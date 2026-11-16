@@ -1,0 +1,8 @@
+data/
+artifacts/
+sessions/
+uav_runtime/.venv/
+__pycache__/
+*.pyc
+.nanobot/
+nanobot-workspace.fragment.json
