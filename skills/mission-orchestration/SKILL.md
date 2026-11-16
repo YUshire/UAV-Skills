@@ -8,7 +8,7 @@ description: 根据已有候选无人机预算、区域作业和数值成本，�
 入口为 `scripts/allocate.py`，产物类型为 `allocation`。已知的纯数值输入可以独立求解；地点、机队记录、地图成本和最终航迹是其他能力的输入或结果，不由本脚本查询或生成。
 
 ```bash
-python3 "$PLAN_AGENT_WORKSPACE/skills/mission-orchestration/scripts/allocate.py" --input-file <输入JSON的绝对路径>
+uav_runtime/.venv/bin/python uav_runtime/run.py skills/mission-orchestration/scripts/allocate.py --input-file <输入JSON的绝对路径>
 ```
 
 也可用 `--input '<JSON对象>'`，两种输入方式互斥。
@@ -23,7 +23,7 @@ python3 "$PLAN_AGENT_WORKSPACE/skills/mission-orchestration/scripts/allocate.py"
 | `costs.transfer_time` | 同样索引的转场时间矩阵，单位 s |
 | `costs.work_range` | 按 jobs 顺序给出的 N 项完整作业距离，非负数 |
 | `costs.work_time` | 同序的 N 项完整作业时间，正数 |
-| `costs.reachable` | 每个候选机对应可执行的 `job_id` 数组 |
+| `costs.reachable` | 每个候选机对应实际可往返转场的 `job_id` 数组；按作业逐个判断，不是“保留候选即可达全部作业”。不可达作业的转场弧为 `null`，必须由该数组排除 |
 
 矩阵索引 0 是该机基地，1..N 严格对应 jobs 顺序。对角线为 0 或 null，其他有效值须为非负有限数。不可达弧可为 null，但必须由 reachable 排除；两个可执行节点之间缺成本返回 `MISSING_COST`。作业向量也接受 N+1 项格式，首项为 0 或 null。
 

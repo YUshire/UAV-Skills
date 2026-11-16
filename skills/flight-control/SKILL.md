@@ -24,6 +24,15 @@ description: 把已生成的任务航迹组装成每架无人机的原始 WGS84 
 
 ## 由任务航迹组装
 
+使用脚本直接读取本次 build 产物，完成组装、dry-run 并保存完整结果：
+
+```bash
+uav_runtime/.venv/bin/python uav_runtime/run.py skills/flight-control/scripts/assemble_plan.py \
+  --input '{"plan":{"ref":"<build实际返回的artifact_file>","select":"/data"}}'
+```
+
+返回 `artifact_file` 和每架机的报告摘要。原始 WGS84 序列在 `/data/participants/<索引>/raw_batch`；已转换的本地序列在同一项的 `dry_run.batch`。这些字段供内部取数与后续调用；普通回复按 mission-planning 第五节说明任务安排和实际状态，需要文件时提供“完整方案”链接。电量、航程取 `summary.participants`，动作数只在用户询问动作时展示。此脚本只做离线校验，`submitted=false`。以下是它采用的映射规则。
+
 对任务航迹 `planning_routes.py` 的 `build` 结果中的每个 `assignments[i]`（完整数据在返回文件的 `data` 中）：
 
 1. `task_id` = `<task_key>-<uav_id>`，例如 `T1021153012a3f2-UAV-003`。
@@ -51,7 +60,7 @@ description: 把已生成的任务航迹组装成每架无人机的原始 WGS84 
 ## 只规划：dry-run 校验
 
 ```bash
-python3 "$PLAN_AGENT_WORKSPACE/skills/flight-control/scripts/submit_queue_batch.py" \
+uav_runtime/.venv/bin/python uav_runtime/run.py skills/flight-control/scripts/submit_queue_batch.py \
   --json '<动作序列 JSON 数组>' --origin-lat <origin.latitude> --origin-lon <origin.longitude> --dry-run
 ```
 
@@ -63,13 +72,15 @@ python3 "$PLAN_AGENT_WORKSPACE/skills/flight-control/scripts/submit_queue_batch.
 | `INVALID_ARGUMENT` | 按 `message` 修正序列后重试一次，仍失败就报告 |
 | `ERROR` | 报告错误并停止 |
 
-返回中的 `batch` 是已转换为该机 MAVROS 本地坐标、补齐默认参数的 ROS 飞控动作序列：只规划时把它原样作为最终输出；它不能再交给 register-plan 或任何转换命令（不能二次转换）。单项“校验动作序列”请求也用这条命令。
+返回中的 `batch` 是已转换为该机 MAVROS 本地坐标、补齐默认参数的 ROS 飞控动作序列；它不能再交给 register-plan 或任何转换命令（不能二次转换）。任务规划使用上面的组装脚本保存并交付完整结果；单项“校验动作序列”请求用这条命令，已有数组文件可用 `--file <路径>` 代替 `--json`。
 
 通用 dry-run 不执行中央任务的作业/收尾校验：纯转场数组、删掉返航段的数组可能通过格式校验，但不能据此称当前中央任务支持它。完整任务还须满足本技能末尾的中央计划规则；单项动作校验无需强加搜索或巡逻。
 
 ## 执行：中央下发四步
 
-用户确认了具体任务确认卡后才做这四步；确认边界见 AGENTS.md（故障补做不需要确认）。
+按 mission-planning 判定执行授权：明确的动作指令直接进入以下流程；用户要求“确认后执行”或方案改变了明确约束时，先取得对应确认。只规划请求使用上面的 dry-run。
+
+本节依赖外部部署的 `mission_client.py`、中央服务和 ROS 环境，配置以 AGENTS.md 的环境检查为准。离线工作区缺少这些组件时完成上面的 dry-run 并报告未下发，不能把本地路径设成 `MIGRATION_ROOT` 来代替部署。
 
 所有中央命令的写法：
 
@@ -88,21 +99,21 @@ python3 "$MIGRATION_ROOT/scripts/mission_client.py" <操作> --agent-session-id 
  "perception":{"query_id":"<该机 query_id>","session_id":"<该机 session_id>"}}
 ```
 
-- `batch` 逐字复制确认卡中该机的序列；故障补做没有确认卡，用组装结果。
+- `batch` 使用本次组装的原始 WGS84 序列；有已确认卡时逐字复制卡片中该机的序列。
 - 没有目标时省略 `perception`；有目标时取 `status` 返回的 `fleet.<uav_id>.perception`，两个值必须完全一致。
 - 注册时会用与 dry-run 相同的校验器检查序列，执行模式下不必另做 dry-run。成功返回 `plan_ref`。
 
 **2. authorize**（整个任务一次）：
 
 ```json
-{"user_intent":"<原指令>；用户确认：<确认原话>",
+{"user_intent":"<用户的原始执行指令>",
  "spec":{"participants":[{"uav_id":"UAV-003","plan_ref":{"id":"plan-…","revision":1}}],
          "targets":[目标清单，没有目标时为 []],
          "policies":{"land_on_return":true},
          "authorization_ref":"pending-authorization"}}
 ```
 
-`user_intent` 写用户的原指令和确认的原话，中央会把它和 spec 摘要一起存进授权记录；故障补做写“<原指令>；故障补做：<故障机> 未完成的 <作业名>”。取返回结果中的 `spec` 字段（已带真实 `authorization_ref`），后面两步原样使用这份 `spec`。用户要求“发现后跟踪”时，`policies` 改为：
+`user_intent` 写真实的原始执行指令；用户另外确认过方案时追加“；用户确认：<确认原话>”，没有该回复就不添加。中央会把它和 spec 摘要一起存进授权记录。故障补做写“<原指令>；故障补做：<故障机> 未完成的 <作业名>”。取返回结果中的 `spec` 字段（已带真实 `authorization_ref`），后面两步原样使用这份 `spec`。用户要求“发现后跟踪”时，`policies` 改为：
 
 ```json
 {"land_on_return":true,"on_first_confirmed":"APPROACH_AND_TRACK","tracking_target_ids":["<target_id>"],
@@ -126,7 +137,7 @@ python3 "$MIGRATION_ROOT/scripts/mission_client.py" submit --agent-session-id "$
 
 | 错误码 | 处理 |
 |---|---|
-| `INVALID_PLAN`、`INVALID_INPUT` | 按 `message` 修正后重试一次；不要原样重发。用户已确认的动作序列不自行修改：报告原因，重新规划并重新出卡 |
+| `INVALID_PLAN`、`INVALID_INPUT` | 按 `message` 修正明确的格式或参数错误后重试一次；涉及用户明确约束或已确认动作的变化时，说明差异并重新取得接受 |
 | `UAV_UNAVAILABLE`、`UAV_BUSY` | 该机不在线或被占用：停止并报告 |
 | `PERCEPTION_UNAVAILABLE` | 感知引用与当前会话不一致：重新读 `status` 的 `fleet.<uav_id>.perception` 再注册 |
 | `EXECUTION_DISABLED`、`ADAPTER_UNAVAILABLE`、`SERVICE_RECOVERING` | 服务当前不能执行：报告并停止 |

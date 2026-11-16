@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
-"""Compatibility entry point; requests now use the active Gazebo semantic map."""
+"""Workspace-local synthetic route previews; no map or execution backend."""
 
-from semantic_map import main
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+from uav_runtime.mock_routes import main
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

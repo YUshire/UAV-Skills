@@ -27,8 +27,11 @@ description: 管理每架无人机的目标感知：把用户要找的目标整�
 - 颜色、衣着写在 `description`，不写进 `category`（不要写成 `red person`）。
 - 中央任务 `authorize` 的 `targets` 使用同一份清单（只取 `targets` 数组）。
 - 探索、建图任务没有目标，不启动感知。
+- “查看、看看、扫一遍”按 mission-planning 解析；上下文有搜索对象就沿用，否则按无目标区域查看处理。已给出的可识别类别或外观足以表达目标时直接整理清单，不追问额外特征。
 
 ## 命令
+
+下列在线命令需要已部署的外部运行项目、ROS 环境和中央服务；先按 AGENTS.md 检查环境。本工作区自带的离线目标校验见下节。
 
 ```bash
 source "$ROS_SETUP" && source "$CATKIN_SETUP" && \
@@ -45,15 +48,14 @@ source "$ROS_SETUP" && source "$CATKIN_SETUP" && \
 
 感知始终以默认的 `detect-and-continue`（只检测，不接管飞行）模式运行，不加 `--mode`。
 
-**只规划时的校验**：不需要 ROS，命令为
+**本地离线校验**：不需要 ROS 或外部运行项目，命令为
 
 ```bash
-python3 "$MIGRATION_ROOT/scripts/uav_perception.py" start --uav-id <uav_id> --query-json '<目标清单对象>' --dry-run
+uav_runtime/.venv/bin/python uav_runtime/run.py skills/target-detection/scripts/validate_targets.py \
+  --uav-id <uav_id> --query-json '<含search_id和targets的目标清单对象>'
 ```
 
-返回启动预览（含 `backend`、`mode`、`categories`），不启动感知；有这份预览即校验通过，失败时输出“感知操作失败: …”。
-
-该预览只证明清单格式和机号配置合法，不证明目标实际存在、实例去重、数量达标或完成策略可实现。
+返回 `validated=true`、`submitted=false`、`perception_started=false`、`backend_verified=false`，校验范围为目标格式和该机的状态/资源库记录。在线部署后仍须检查真实感知后端；该结果不代表感知已启动或目标已找到。
 
 ## 下发前的感知准备
 
@@ -63,7 +65,7 @@ python3 "$MIGRATION_ROOT/scripts/uav_perception.py" start --uav-id <uav_id> --qu
 
 ## 单项请求
 
-- 开启识别：需要明确是哪架机、找什么目标；多架机在线而用户没说明时要问清。不生成飞行动作。
+- 开启识别：机号和目标优先从本轮指令、当前任务及会话已明确的对象取得；仍有多架候选且无法判断指向，或完全没有识别对象时，才询问缺项。不生成飞行动作。
 - “还剩哪些目标”：`progress` 查一次后回答，不循环查询。
 - 停止识别：`stop`。
 
@@ -87,3 +89,4 @@ python3 "$MIGRATION_ROOT/scripts/uav_perception.py" start --uav-id <uav_id> --qu
 - 目标是否找到以中央复核为准：逐个 `target_id` 看 MATCH。YOLO 框只是候选；NO_MATCH、UNKNOWN 都不等于目标不存在。
 - 检测不到粗类别时不会触发语义复核，不能据此断言现场没有目标。
 - 目标位置缺失时如实说明，不用无人机位置代替目标位置。
+- “行驶中”“车队”等不是检测模型的完成条件：目标按粗类别逐项匹配，移动状态只写在 `description` 里供语义复核；不要承诺找到“一个车队”或统计车队数量。

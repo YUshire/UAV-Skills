@@ -4,16 +4,17 @@
 import argparse
 import json
 import math
+import os
 import sys
 from pathlib import Path
 from xml.etree.ElementTree import ParseError
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[5]))
-from uav_runtime.map_provider import create_map as SemanticMap, map_context
+RUNTIME_ROOT = Path(os.environ.get("MIGRATION_ROOT") or Path(__file__).resolve().parents[3]).resolve()
+sys.path.insert(0, str(RUNTIME_ROOT))
 
 
-def fail(code, message):
-    print(json.dumps({"status": code, "message": str(message)}, ensure_ascii=False))
+def fail(code, message, **details):
+    print(json.dumps({"status": code, "message": str(message), **details}, ensure_ascii=False))
     raise SystemExit(2 if code == "INVALID_ARGUMENT" else 1)
 
 
@@ -240,6 +241,12 @@ def main():
     a.add_argument("--radius", type=float); a.add_argument("--lane", type=float, default=50.0)
     a.add_argument("--start-lon",type=float); a.add_argument("--start-lat",type=float)
     args = parser.parse_args()
+    try:
+        from uav_runtime.map_provider import create_map as SemanticMap, map_context
+    except ModuleNotFoundError as exc:
+        fail("ENVIRONMENT_ERROR", "语义地图组件未部署；离线几何预览请使用 mock_offline_map.py",
+             missing_component=exc.name, runtime_root=str(RUNTIME_ROOT), submitted=False,
+             validated_for_execution=False)
     try:
         map_data = SemanticMap(args.world)
         result = (map_data.describe() if args.operation == "query-map" else
