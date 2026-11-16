@@ -1,0 +1,208 @@
+"""Prepare existing fleet records and explicit geographic jobs for seven skills."""
+from copy import deepcopy
+import math
+
+from .atomic.common import AtomicError, require, required
+from .direct_path import EARTH_RADIUS_M, direct_route
+
+
+def number(value, field, positive=False):
+    try:
+        valid = type(value) in (int, float) and math.isfinite(value)
+        result = float(value) if valid else None
+    except (OverflowError, ValueError):
+        result = None
+    if result is None or (positive and result <= 0):
+        raise AtomicError('INVALID_ARGUMENT', field + ' 必须是有限数值' + ('且大于0' if positive else ''), field=field)
+    return result
+
+
+def coordinate(lon, lat, field):
+    lon, lat = number(lon, field + '.longitude'), number(lat, field + '.latitude')
+    if not -180 <= lon <= 180 or not -90 <= lat <= 90:
+        raise AtomicError('INVALID_ARGUMENT', field + ' 超出WGS84范围', field=field)
+    return [lon, lat]
+
+
+def prepare_candidates(data):
+    """查询当前只读机队记录，按给定候选条件筛选并返回数值预算。"""
+    from .atomic.query import compute as query
+    from .atomic.selection import compute as select
+    require(data, 'input', dict)
+    spatial_fields = {'center_lon', 'center_lat', 'radius_m', 'job_radius_m'}
+    if set(data) - ({'uav_ids', 'exclude_uavs', 'payload', 'flight_alt'} | spatial_fields):
+        raise AtomicError('INVALID_ARGUMENT', '候选查询含不支持的字段')
+    altitude = number(data.get('flight_alt', 1.2), 'flight_alt', True)
+    has_lon, has_lat = 'center_lon' in data, 'center_lat' in data
+    if has_lon != has_lat:
+        raise AtomicError('INVALID_ARGUMENT', 'center_lon与center_lat须成对提供')
+    center = coordinate(data['center_lon'], data['center_lat'], 'center') if has_lon else None
+    radius = number(data['radius_m'], 'radius_m', True) if data.get('radius_m') is not None else None
+    job_radius = number(data.get('job_radius_m', 0), 'job_radius_m')
+    if job_radius < 0:
+        raise AtomicError('INVALID_ARGUMENT', 'job_radius_m 不能为负')
+    if radius is not None and center is None:
+        raise AtomicError('INVALID_ARGUMENT', 'radius_m 需要同时提供 center_lon/center_lat')
+    spatial_query = center is not None and not data.get('uav_ids')
+    max_range = None
+    bbox = None
+    if spatial_query:
+        if radius is None:
+            max_row = query({'entity': 'resources',
+                             'sql': 'SELECT MAX(max_range) AS max_range FROM uav_resource'})
+            max_range = number(max_row['records'][0]['max_range'], 'max_range', True)
+            radius = max_range / 2 + job_radius
+        # SQL-side bounding box: only in-box status rows are read; the exact
+        # circle is applied below with great-circle distance.
+        lat_delta = math.degrees(radius / EARTH_RADIUS_M)
+        lon_delta = lat_delta / max(math.cos(math.radians(center[1])), 1e-9)
+        bbox = {'min_lon': center[0] - lon_delta, 'max_lon': center[0] + lon_delta,
+                'min_lat': center[1] - lat_delta, 'max_lat': center[1] + lat_delta}
+    facts = query({'entity': 'fleet', 'bounds': bbox} if bbox else {'entity': 'fleet'})
+    bbox_input_count = len(facts['fleet'])
+    # Missing membership is a concrete exclusion, even if another table carries
+    # similarly named fields. It cannot be repaired by joining unrelated values.
+    fleet = []
+    missing = []
+    for record in facts['fleet']:
+        if not all(record.get(key) is True for key in ('has_status', 'has_resource')):
+            missing.append({'uav_id': record['uav_id'], 'reasons': ['状态库或资源库缺记录']})
+        else:
+            fleet.append(record)
+    spatial_filter = None
+    circle_excluded = 0
+    if spatial_query:
+        spatial_filter = {'center': center, 'radius_m': radius, 'bbox': bbox,
+                          'bbox_input_count': bbox_input_count,
+                          'circle_excluded_count': 0,
+                          'max_range_m': max_range, 'job_radius_m': job_radius}
+        if not facts['fleet']:
+            raise AtomicError('NO_CANDIDATE', '附近预筛范围内没有机队记录',
+                              spatial_filter=spatial_filter)
+        near = []
+        for record in fleet:
+            origin = record.get('origin') or {}
+            try:
+                distance = direct_route(
+                    (number(origin.get('longitude'), 'origin.longitude'),
+                     number(origin.get('latitude'), 'origin.latitude')),
+                    (center[0], center[1]), 1.0, points=0)['one_way_distance']
+            except AtomicError:
+                near.append(record)  # let selection report the invalid origin
+                continue
+            if distance <= radius + 1e-6:
+                near.append(record)
+        circle_excluded = len(fleet) - len(near)
+        spatial_filter['circle_excluded_count'] = circle_excluded
+        fleet = near
+        if not fleet:
+            raise AtomicError('NO_CANDIDATE', '附近预筛范围内没有机队记录',
+                              spatial_filter=spatial_filter)
+    selection_input = {key: value for key, value in data.items() if key not in spatial_fields}
+    selected = select(dict(selection_input, fleet=fleet, flight_alt=altitude))
+    relevant_missing = [row for row in missing if not data.get('uav_ids') or row['uav_id'] in data['uav_ids']]
+    excluded = selected['excluded'] + relevant_missing
+    if data.get('uav_ids') and excluded:
+        raise AtomicError('CANDIDATE_EXCLUDED', '用户点名的候选机未全部通过筛选', excluded=excluded)
+    candidates = deepcopy(selected['candidates'])
+    for row in candidates:
+        row['battery'] = row['battery_level']
+    return {'candidates': candidates, 'excluded': excluded, 'flight_alt': altitude,
+            'reserve_battery_percent': selected['reserve_battery_percent'],
+            'source': 'configured_readonly_snapshot', 'submitted': False,
+            '_summary': {'candidate_count': len(candidates),
+                         'excluded_count': len(excluded),
+                         'bbox_input_count': bbox_input_count if spatial_filter else None,
+                         'circle_excluded_count': circle_excluded,
+                         'flight_alt': altitude,
+                         'spatial_filter': spatial_filter,
+                         'sample_uav_ids': [row['uav_id'] for row in candidates[:5]]}}
+
+
+def resolve_jobs(data):
+    """把已查询地点记录与用户明确区域参数转为数值作业；不查询数据库。"""
+    require(data, 'input', dict)
+    if set(data) - {'jobs', 'places'}:
+        raise AtomicError('INVALID_ARGUMENT', '区域整理含不支持的字段')
+    raw_jobs = require(required(data, 'jobs'), 'jobs', list)
+    if not 1 <= len(raw_jobs) <= 64:
+        raise AtomicError('INVALID_ARGUMENT', 'jobs 数量须为1..64')
+    places = require(data.get('places', []), 'places', list)
+    indexed = {}
+    for row in places:
+        require(row, 'places[]', dict)
+        name, alias = row.get('region_name'), row.get('alias')
+        if not isinstance(name, str) or not name.strip() or (alias is not None and not isinstance(alias, str)):
+            raise AtomicError('INVALID_ARGUMENT', '地点记录需要非空region_name及字符串或null的alias')
+        for label in set([name] + [part.strip() for part in (alias or '').split(';') if part.strip()]):
+            indexed.setdefault(label, []).append(row)
+    allowed = {'job_id', 'name', 'place', 'center_lon', 'center_lat', 'shape', 'radius', 'length', 'width', 'uav_id'}
+    jobs, seen = [], set()
+    for i, item in enumerate(raw_jobs, 1):
+        require(item, 'jobs[]', dict)
+        if set(item) - allowed:
+            raise AtomicError('INVALID_ARGUMENT', '作业含不支持的字段', fields=sorted(set(item) - allowed))
+        jid = item.get('job_id', 'J' + str(i))
+        if not isinstance(jid, str) or not jid.strip() or jid in seen:
+            raise AtomicError('INVALID_ARGUMENT', 'job_id须为唯一非空字符串')
+        seen.add(jid)
+        row = None
+        place = item.get('place')
+        if 'place' in item:
+            if not isinstance(place, str) or not place.strip():
+                raise AtomicError('INVALID_ARGUMENT', 'place须为非空字符串')
+            matches = indexed.get(place, [])
+            if not matches:
+                raise AtomicError('NOT_FOUND', '提供的地点记录中没有该地名或别名', place=place)
+            if len(matches) != 1:
+                raise AtomicError('AMBIGUOUS', '地点匹配到多条记录', place=place)
+            row = matches[0]
+        name = item.get('name', place or jid)
+        if not isinstance(name, str) or not name.strip():
+            raise AtomicError('INVALID_ARGUMENT', 'name须为非空字符串')
+        shape = item.get('shape') or (row or {}).get('region_shape')
+        if shape not in ('rectangle', 'circle'):
+            raise AtomicError('MISSING_PARAMETER' if not shape else 'INVALID_ARGUMENT',
+                              '区域需要rectangle或circle及明确尺寸', job_id=jid)
+        sizes = {}
+        if shape == 'circle':
+            if 'radius' not in item:
+                raise AtomicError('MISSING_PARAMETER', '圆形区域需要用户给出radius', job_id=jid)
+            sizes['radius'] = number(item['radius'], 'radius', True)
+        else:
+            for field, registry in [('length', 'region_length_m'), ('width', 'region_width_m')]:
+                value = item[field] if field in item else (row or {}).get(registry)
+                if value is None:
+                    raise AtomicError('MISSING_PARAMETER', '矩形区域缺少' + field, job_id=jid)
+                sizes[field] = number(value, field, True)
+        if 'center_lon' in item or 'center_lat' in item:
+            if 'center_lon' not in item or 'center_lat' not in item:
+                raise AtomicError('MISSING_PARAMETER', 'center_lon和center_lat须成对提供', job_id=jid)
+            center = coordinate(item['center_lon'], item['center_lat'], 'center')
+        elif row is not None:
+            lon, lat = row.get('region_center_longitude'), row.get('region_center_latitude')
+            if lon is None and lat is None and not row.get('region_shape'):
+                # An explicitly sized area around a registered point uses that
+                # point; no default radius or inferred extent is introduced.
+                center = coordinate(row.get('longitude'), row.get('latitude'), 'point')
+            elif lon is None or lat is None:
+                raise AtomicError('MISSING_PARAMETER', '登记区域中心不完整', job_id=jid)
+            else:
+                center = coordinate(lon, lat, 'region_center')
+        else:
+            raise AtomicError('MISSING_PARAMETER', '需要地点记录或成对中心坐标', job_id=jid)
+        entrance = None
+        if row is not None:
+            lon, lat = row.get('longitude'), row.get('latitude')
+            if lon is not None or lat is not None:
+                if lon is None or lat is None:
+                    raise AtomicError('MISSING_PARAMETER', '地点入口坐标不完整', job_id=jid)
+                entrance = coordinate(lon, lat, 'entrance')
+        fixed = item.get('uav_id')
+        if fixed is not None and (not isinstance(fixed, str) or not fixed.strip()):
+            raise AtomicError('INVALID_ARGUMENT', 'uav_id须为非空字符串')
+        jobs.append({'job_id': jid, 'name': name, 'shape': shape, 'center': center,
+                     'entrance': entrance, 'fixed_uav': fixed,
+                     'area_source': 'user' if set(item) & {'center_lon', 'center_lat', 'shape', 'radius', 'length', 'width'} else 'registry',
+                     **sizes})
+    return {'jobs': jobs, 'submitted': False, '_summary': {'jobs': jobs}}

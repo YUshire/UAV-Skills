@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
 """Read eligible fleet records and calculate available numerical budgets."""
-import os
 from pathlib import Path
 import sys
 
-runtime = os.environ.get('MIGRATION_ROOT')
-if not runtime:
-    raise SystemExit('MIGRATION_ROOT is required')
-sys.path.insert(0, str(Path(runtime).resolve()))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from uav_runtime.atomic.common import run
 from uav_runtime.seven_inputs import prepare_candidates
 

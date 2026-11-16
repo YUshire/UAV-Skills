@@ -26,7 +26,7 @@ description: 地理空间换算：计算相对位置、将已查询的地点记�
 ## calc_offset.py
 
 ```bash
-python3 "$PLAN_AGENT_WORKSPACE/skills/spatial-compute/scripts/calc_offset.py" \
+uav_runtime/.venv/bin/python uav_runtime/run.py skills/spatial-compute/scripts/calc_offset.py \
   --lon <参考点经度> --lat <参考点纬度> --bearing <方位角> --distance <距离>
 ```
 
@@ -37,12 +37,12 @@ python3 "$PLAN_AGENT_WORKSPACE/skills/spatial-compute/scripts/calc_offset.py" \
 | `--bearing` | 是 | 方位角，正北为 0°，顺时针：北 0、东北 45、东 90、东南 135、南 180、西南 225、西 270、西北 315 |
 | `--distance` | 是 | 参考点到目标点的距离，m，须 > 0 |
 
-成功返回 `center_lon`、`center_lat`（目标点）以及回显的输入。参考点先按 mission-planning 的“相对基准”确认，再由 data-query 提供：地点有登记区域时用区域中心 `region_center_longitude/region_center_latitude`，否则用地点坐标；指定单机时不能擅自换成地点库默认位置，也不能把起飞点记录冒充实时位置。`--alt` 不用传。
+成功返回 `center_lon`、`center_lat`（目标点）以及回显的输入。参考点按 mission-planning 的“相对基准”确定，已有会话基准直接沿用：地点有登记区域时用区域中心 `region_center_longitude/region_center_latitude`，否则用地点坐标；单机实时位置与登记起飞点保持各自含义。所需记录由 data-query 提供。`--alt` 不用传。
 
 ## build_fuel_box.py
 
 ```bash
-python3 "$PLAN_AGENT_WORKSPACE/skills/spatial-compute/scripts/build_fuel_box.py" \
+uav_runtime/.venv/bin/python uav_runtime/run.py skills/spatial-compute/scripts/build_fuel_box.py \
   --center-lon <中心经度> --center-lat <中心纬度> --shape rectangle --length <东西长> --width <南北宽> --flight-alt <航高>
 ```
 
@@ -60,7 +60,7 @@ python3 "$PLAN_AGENT_WORKSPACE/skills/spatial-compute/scripts/build_fuel_box.py"
 
 | 状态 | 处理 |
 |---|---|
-| `MISSING_PARAMETER` | 上下文里有对应信息就补上；没有就停止并询问用户 |
+| `MISSING_PARAMETER` | 先从用户原话、上下文、对应数据库和本技能默认值补齐；仍缺计算必需字段时，再一次询问具体缺项 |
 | `INVALID_ARGUMENT` | 检查经纬度范围、正数约束和形状对应的尺寸参数，修正后最多重试一次 |
 | `ERROR` | 停止，报告错误，不自行计算坐标或边界 |
 
