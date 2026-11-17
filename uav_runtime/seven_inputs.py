@@ -135,7 +135,8 @@ def resolve_jobs(data):
             raise AtomicError('INVALID_ARGUMENT', '地点记录需要非空region_name及字符串或null的alias')
         for label in set([name] + [part.strip() for part in (alias or '').split(';') if part.strip()]):
             indexed.setdefault(label, []).append(row)
-    allowed = {'job_id', 'name', 'place', 'center_lon', 'center_lat', 'shape', 'radius', 'length', 'width', 'uav_id'}
+    allowed = {'job_id', 'name', 'place', 'center_lon', 'center_lat', 'shape', 'radius', 'length', 'width', 'uav_id',
+               'task_type', 'laps', 'search_timeout'}
     jobs, seen = [], set()
     for i, item in enumerate(raw_jobs, 1):
         require(item, 'jobs[]', dict)
@@ -200,8 +201,27 @@ def resolve_jobs(data):
         fixed = item.get('uav_id')
         if fixed is not None and (not isinstance(fixed, str) or not fixed.strip()):
             raise AtomicError('INVALID_ARGUMENT', 'uav_id须为非空字符串')
+        step = {}
+        task_type = item.get('task_type')
+        if task_type is not None:
+            if task_type not in ('search', 'patrol'):
+                raise AtomicError('INVALID_ARGUMENT', 'task_type 须为 search 或 patrol', job_id=jid)
+            step['task_type'] = task_type
+        laps = item.get('laps')
+        if laps is not None:
+            if type(laps) is not int or laps < 1:
+                raise AtomicError('INVALID_ARGUMENT', 'laps 须为正整数', job_id=jid)
+            if task_type == 'search' and laps != 1:
+                raise AtomicError('INVALID_ARGUMENT', 'laps 只用于巡逻', job_id=jid)
+            step['laps'] = laps
+        timeout = item.get('search_timeout')
+        if timeout is not None:
+            timeout = number(timeout, 'search_timeout', True)
+            if task_type == 'patrol':
+                raise AtomicError('INVALID_ARGUMENT', 'search_timeout 只用于搜索', job_id=jid)
+            step['search_timeout'] = timeout
         jobs.append({'job_id': jid, 'name': name, 'shape': shape, 'center': center,
                      'entrance': entrance, 'fixed_uav': fixed,
                      'area_source': 'user' if set(item) & {'center_lon', 'center_lat', 'shape', 'radius', 'length', 'width'} else 'registry',
-                     **sizes})
+                     **sizes, **step})
     return {'jobs': jobs, 'submitted': False, '_summary': {'jobs': jobs}}

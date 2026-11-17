@@ -49,6 +49,9 @@ def _prepared(request, candidate_limit=64):
     laps = request.get("laps", 1)
     if type(laps) is not int or laps < 1 or (task_type != "patrol" and laps != 1):
         raise AtomicError("INVALID_ARGUMENT", "laps 须为正整数且只用于巡逻")
+    ordered = request.get("ordered", False)
+    if type(ordered) is not bool:
+        raise AtomicError("INVALID_ARGUMENT", "ordered 须为布尔值")
     speed = request.get("speed")
     if speed is not None:
         speed = finite(speed, "speed", True)
@@ -80,9 +83,25 @@ def _prepared(request, candidate_limit=64):
             finite(required(job, "radius"), "radius", True)
         else:
             raise AtomicError("INVALID_ARGUMENT", "区域须为rectangle或circle")
+        job_type = job.get("task_type") or task_type
+        if job_type not in ("search", "patrol"):
+            raise AtomicError("INVALID_ARGUMENT", "job.task_type 须为 search 或 patrol", job_id=job["job_id"])
+        job_laps = job.get("laps")
+        if job_laps is None:
+            job_laps = laps if job_type == "patrol" else 1
+        if type(job_laps) is not int or job_laps < 1 or (job_type != "patrol" and job_laps != 1):
+            raise AtomicError("INVALID_ARGUMENT", "job.laps 须为正整数且只用于巡逻", job_id=job["job_id"])
+        job["task_type"] = job_type
+        job["laps"] = job_laps
+        job["work_speed"] = speed or (1.2 if job_type == "patrol" else 0.6)
+        if "search_timeout" in job:
+            job["search_timeout"] = finite(job["search_timeout"], "jobs.search_timeout", True)
+            if job_type != "search":
+                raise AtomicError("INVALID_ARGUMENT", "search_timeout 只用于搜索", job_id=job["job_id"])
+    work_speeds = [job["work_speed"] for job in jobs]
     return {"candidates": candidates, "jobs": jobs, "task_type": task_type,
-            "flight_alt": altitude, "laps": laps,
-            "speeds": {"transit": speed or 1.2, "work": speed or (1.2 if task_type == "patrol" else 0.6)},
+            "flight_alt": altitude, "laps": laps, "ordered": ordered,
+            "speeds": {"transit": speed or 1.2, "work": max(work_speeds)},
             "requested_speed": speed}
 
 
@@ -216,7 +235,7 @@ def _screen_candidates(prepared):
     fastest = max(speeds.values())
     for candidate in prepared["candidates"]:
         origin = candidate["origin"]
-        speed_ok = all(s <= candidate["max_speed"] + 1e-9 for s in speeds.values())
+        transit_ok = speeds["transit"] <= candidate["max_speed"] + 1e-9
         bounds = []
         for job in prepared["jobs"]:
             radius = (job["radius"] if job["shape"] == "circle"
@@ -225,11 +244,13 @@ def _screen_candidates(prepared):
                                     job["center"], prepared["flight_alt"], points=0)["one_way_distance"]
             # direct_route rounds to millimetres; bias downward to preserve a lower bound.
             lower = 2 * max(0.0, distance - radius - 0.001)
+            speed_ok = transit_ok and job["work_speed"] <= candidate["max_speed"] + 1e-9
             bound = {"job_id": job["job_id"], "distance_m": distance,
                      "round_trip_lower_bound_m": lower,
                      "time_lower_bound_s": lower / fastest,
                      "range_ok": lower <= candidate["range_budget"] + 1e-6,
-                     "time_ok": lower / fastest <= candidate["time_budget"] + 1e-6}
+                     "time_ok": lower / fastest <= candidate["time_budget"] + 1e-6,
+                     "speed_ok": speed_ok, "work_speed_mps": job["work_speed"]}
             bounds.append(bound)
             if job.get("fixed_uav") == candidate["uav_id"] and not (
                     speed_ok and bound["range_ok"] and bound["time_ok"]):
@@ -239,12 +260,14 @@ def _screen_candidates(prepared):
                                              speed_ok=speed_ok,
                                              max_speed_mps=candidate["max_speed"],
                                              requested_transit_speed_mps=speeds["transit"],
-                                             requested_work_speed_mps=speeds["work"]))
-        if speed_ok and any(b["range_ok"] and b["time_ok"] for b in bounds):
+                                             requested_work_speed_mps=job["work_speed"]))
+        usable = [b for b in bounds if b["speed_ok"]]
+        if any(b["range_ok"] and b["time_ok"] for b in usable):
             retained.append(candidate)
             continue
-        best = min(bounds, key=lambda b: (b["round_trip_lower_bound_m"], b["time_lower_bound_s"]))
-        if not speed_ok:
+        best = min(usable or bounds,
+                   key=lambda b: (b["round_trip_lower_bound_m"], b["time_lower_bound_s"]))
+        if not usable:
             reason = "SPEED_LIMIT"
             failed = ["speed"] + [name for name in ("range", "time") if not best[name + "_ok"]]
         else:
@@ -253,10 +276,10 @@ def _screen_candidates(prepared):
                          "failed_bounds": failed,
                          "range_budget": candidate["range_budget"],
                          "time_budget": candidate["time_budget"],
-                         "speed_ok": speed_ok,
+                         "speed_ok": best["speed_ok"],
                          "max_speed_mps": candidate["max_speed"],
                          "requested_transit_speed_mps": speeds["transit"],
-                         "requested_work_speed_mps": speeds["work"],
+                         "requested_work_speed_mps": best["work_speed_mps"],
                          "best_bound": best})
 
     reasons = {"RANGE_LOWER_BOUND": 0, "TIME_LOWER_BOUND": 0, "BOTH_LOWER_BOUNDS": 0,
@@ -307,7 +330,7 @@ def _screen_candidates(prepared):
 
 def costs(request):
     """Calculate numerical allocation costs from supplied aircraft and regions."""
-    if set(request) - {"operation", "candidates", "jobs", "task_type", "flight_alt", "laps", "speed"}:
+    if set(request) - {"operation", "candidates", "jobs", "task_type", "flight_alt", "laps", "speed", "ordered"}:
         raise AtomicError("INVALID_ARGUMENT", "costs 输入含不支持字段")
     prepared = _prepared(request, candidate_limit=4096)
     screening = _screen_candidates(prepared)
@@ -335,19 +358,24 @@ def costs(request):
     # box and may be split between two owners, so it must not force single
     # ownership.
     single = [job["job_id"] for job in prepared["jobs"]
-              if job["shape"] == "circle" and prepared["task_type"] == "patrol"]
+              if job["shape"] == "circle" and job["task_type"] == "patrol"]
     constraints = {}
     if fixed:
         constraints["fixed_assignments"] = fixed
     if single:
         constraints["single_owner_jobs"] = single
+    task_types = sorted({job["task_type"] for job in prepared["jobs"]})
     output = {"status": "OK", "prepared": prepared, "prepared_digest": digest(prepared),
               "candidates": deepcopy(prepared["candidates"]),
-              "jobs": [{"job_id": j["job_id"], "name": j.get("name", j["job_id"])} for j in prepared["jobs"]],
-              "costs": answer["costs"], "constraints": constraints,
+              "jobs": [{"job_id": j["job_id"], "name": j.get("name", j["job_id"]),
+                        "task_type": j["task_type"], "laps": j["laps"]} for j in prepared["jobs"]],
+              "task_type": task_types[0] if len(task_types) == 1 else "mixed",
+              "task_types": task_types, "laps": prepared["laps"],
+              "ordered": prepared["ordered"], "costs": answer["costs"], "constraints": constraints,
               "candidate_screening": screening, "submitted": False}
     output["_summary"] = {"job_ids": answer["job_ids"], "candidate_ids": [u["uav_id"] for u in prepared["candidates"]],
-                          "constraints": constraints, "estimated_only": True,
+                          "constraints": constraints, "ordered": prepared["ordered"],
+                          "task_types": task_types, "estimated_only": True,
                           "candidate_screening": {k: v for k, v in screening.items() if k != "excluded"},
                           "note": "成本估计已生成；尚未分配无人机或生成最终航迹"}
     output.update(geometry_model=GEOMETRY_MODEL, map_used=False, mock=True,
@@ -360,7 +388,8 @@ def _validate_allocation(estimate, allocation):
     prepared = require(required(estimate, "prepared"), "prepared", dict)
     _same(digest(prepared), required(estimate, "prepared_digest"), "区域或参数与成本记录不一致")
     _same(estimate["candidates"], prepared["candidates"], "成本候选机与完整记录不一致")
-    simple_jobs = [{"job_id": j["job_id"], "name": j.get("name", j["job_id"])} for j in prepared["jobs"]]
+    simple_jobs = [{"job_id": j["job_id"], "name": j.get("name", j["job_id"]),
+                    "task_type": j["task_type"], "laps": j["laps"]} for j in prepared["jobs"]]
     _same(estimate["jobs"], simple_jobs, "成本作业与完整记录不一致")
     uids = _records(prepared["candidates"], "uav_id", "candidates")
     jids = _records(prepared["jobs"], "job_id", "jobs")
@@ -465,15 +494,18 @@ def build(request):
         if altitude > maximum:
             raise AtomicError("ALTITUDE_INFEASIBLE", "错高后超过任务或机型航高上限", uav_id=uid,
                               flight_alt=altitude, max_altitude=maximum)
-        ordered = [zones[(jid, uid)] for jid in supplied["job_ids"]]
-        if prepared["task_type"] == "patrol" and any(jobs[jid]["shape"] == "circle" and len(allocation["owners"][jid]) != 1
-                                                       for jid in supplied["job_ids"]):
+        job_order = {job["job_id"]: index for index, job in enumerate(prepared["jobs"])}
+        supplied_jobs = (sorted(supplied["job_ids"], key=lambda jid: job_order[jid])
+                         if prepared["ordered"] else list(supplied["job_ids"]))
+        ordered = [zones[(jid, uid)] for jid in supplied_jobs]
+        if any(jobs[jid]["task_type"] == "patrol" and jobs[jid]["shape"] == "circle"
+               and len(allocation["owners"][jid]) != 1 for jid in supplied_jobs):
             raise AtomicError("ALLOCATION_EVIDENCE_MISMATCH", "圆形巡逻不能分区后代替完整圆周")
         origin = candidate["origin"]
-        steps, transit_range, work_range = build_steps(prepared, ordered, origin, altitude, timeout)
+        steps, transit_range, work_range, work_time = build_steps(prepared, ordered, origin, altitude, timeout)
         distance = transit_range + work_range
         battery_after = candidate["battery"] * (1 - distance / candidate["flight_remain"])
-        duration = transit_range / prepared["speeds"]["transit"] + work_range / prepared["speeds"]["work"]
+        duration = transit_range / prepared["speeds"]["transit"] + work_time
         if duration > candidate["time_budget"]:
             raise AtomicError("BUDGET_EXCEEDED", "最终分区的估算水平作业时间超过预算",
                               uav_id=uid, estimated_time_s=duration, time_budget=candidate["time_budget"])
@@ -484,22 +516,27 @@ def build(request):
                             "estimated_time_s": round(duration, 3),
                             "battery_level": candidate["battery"], "flight_remain": candidate["flight_remain"],
                             "range_budget": candidate["range_budget"], "time_budget": candidate["time_budget"],
-                            "jobs": list(supplied["job_ids"]), "estimated_range_m": round(distance, 3),
+                            "jobs": supplied_jobs, "estimated_range_m": round(distance, 3),
                             "estimated_battery_after": round(battery_after, 6), "steps": steps})
     report_jobs = []
     for job in prepared["jobs"]:
         row = {key: deepcopy(job[key]) for key in ("job_id", "name", "area_source", "shape", "center") if key in job}
         row.update({key: job[key] for key in ("radius", "length", "width") if key in job})
+        row.update({key: job[key] for key in ("task_type", "laps", "search_timeout") if key in job})
         row["owners"] = list(allocation["owners"][job["job_id"]])
         report_jobs.append(row)
+    task_types = sorted({job["task_type"] for job in prepared["jobs"]})
     output = {"status": "OK", "submitted": False, "task_key": "T" + time.strftime("%m%d%H%M%S") + uuid.uuid4().hex[:4],
-              "task_type": prepared["task_type"], "flight_alt": prepared["flight_alt"], "laps": prepared["laps"],
+              "task_type": task_types[0] if len(task_types) == 1 else "mixed",
+              "task_types": task_types, "flight_alt": prepared["flight_alt"], "laps": prepared["laps"],
+              "ordered": prepared["ordered"],
               "speed": prepared.get("requested_speed"), "speeds": prepared["speeds"], "search_timeout": timeout,
               "candidates": [u["uav_id"] for u in prepared["candidates"]], "jobs": report_jobs,
               "assignments": assignments, "unused": deepcopy(allocation["unused"]), "solver": deepcopy(allocation["solver"]),
               "allocation_check": check, "budget_scope": "水平转场和覆盖/巡逻长度估计；不含起降、搜索超时上界或跟踪占用",
               "whole_mission_budget_complete": False}
     output["_summary"] = {"task_key": output["task_key"], "task_type": output["task_type"],
+                          "task_types": output["task_types"], "ordered": output["ordered"],
                           "assignments": [{k: row[k] for k in ("uav_id", "flight_alt", "jobs", "battery_level", "flight_remain",
                                                                "range_budget", "time_budget", "estimated_range_m", "estimated_battery_after")}
                                           for row in assignments], "unused": output["unused"],

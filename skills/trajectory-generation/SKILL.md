@@ -22,13 +22,15 @@ uav_runtime/.venv/bin/python uav_runtime/run.py skills/trajectory-generation/scr
   "operation": "costs",
   "candidates": {"ref": "候选查询实际返回的文件", "select": "/data/candidates"},
   "jobs": {"ref": "区域解析实际返回的文件", "select": "/data/jobs"},
-  "task_type": "search"
+  "task_type": "search",
+  "ordered": false
 }
 ```
 
-- `task_type` 为 `search`（含无目标探索）或 `patrol`；`flight_alt` 默认1.2 m，是错高基准；`laps` 默认1且只用于巡逻；`speed` 可选，省略时转场1.2 m/s、搜索覆盖估计0.6 m/s。
+- 顶层 `task_type` 为 `search`（含无目标探索）或 `patrol`；`flight_alt` 默认1.2 m，是错高基准；`laps` 默认1且只用于巡逻；`speed` 可选，省略时转场1.2 m/s、搜索覆盖估计0.6 m/s。
+- 每个 job 可带 `task_type`、`laps`、`search_timeout`，覆盖顶层默认值；同一区域先巡逻再搜索时写两个 job。`ordered=true` 时 `build` 按 jobs 顺序排列每架机的作业；只保证同一架机内的顺序，跨机固定顺序仍不支持。多步骤任务先用 `check_task.py` 核对，详见 mission-planning 的 combined-tasks。
 - `laps` 是同一次任务内连续巡逻的圈数；周期调度按 mission-planning 说明接口缺口，并完成可独立计算的单趟只读预览。保留原单趟圈数、间隔和持续时间，执行替代方案需用户接受。
-- candidates 包含 `uav_id,origin,range_budget,time_budget,battery,flight_remain,max_altitude`；jobs 包含 `job_id,name,center,shape` 和形状尺寸，可带 `entrance,fixed_uav,area_source`。地点及机队数据由调用方提供，本入口不查询数据库。
+- candidates 包含 `uav_id,origin,range_budget,time_budget,battery,flight_remain,max_altitude`；jobs 包含 `job_id,name,center,shape` 和形状尺寸，可带 `entrance,fixed_uav,area_source`、`task_type,laps,search_timeout`。地点及机队数据由调用方提供，本入口不查询数据库。
 - `costs` 可接收最多4096架完整候选，按区域外接圆的往返距离和时间下界排除预算必超的飞机。`candidate_screening` 包含：`reasons`（`RANGE_LOWER_BOUND` / `TIME_LOWER_BOUND` / `BOTH_LOWER_BOUNDS` / `SPEED_LIMIT` 计数）、`nearest`（最近5架的航程/时间两项是否通过，以及巡航速度下的时间和 `max_speed_mps`）、`range_ok_but_time_fail`（航程够但默认速度下时间不够的机号）、`excluded`（最多20条逐机依据，其余以 `excluded_omitted` 计数）、`assumed_transit_speed_mps` / `transit_speed_mps` / `work_speed_mps` 和 `reachable_count` / `cost_excluded_count`。指定 `speed` 时，`max_speed` 低于该速度的候选自动以 `SPEED_LIMIT` 排除，不需要手工缩小候选范围。所有候选被筛掉时另有 `diagnosis`，给出最近候选、实际绑定约束和可执行建议。将完整候选直接引用进来，后续分配使用成本产物的候选集。筛后超过64架返回 `CANDIDATE_LIMIT_EXCEEDED`，这是求解规模限制；不取前64架、最近64架或自定距离阈值替代全部候选。固定归属预算必超返回 `NO_FEASIBLE_ALLOCATION`。用户逐作业允许集合与筛后候选取交集，交集为空即报告该约束不可行。
 - `NO_FEASIBLE_ALLOCATION` 时先读 `candidate_screening.diagnosis`，按实际绑定约束报告最近候选：只有 `RANGE_LOWER_BOUND` 才能说航程不足；`TIME_LOWER_BOUND` 说明是默认转场速度（1.2 m/s）下时间不够，若最近候选航程通过且巡航速度下时间足够，可指定不超过该机 `max_speed` 的速度后重算；`SPEED_LIMIT` 说明指定速度高于机型上限，应降低速度或换用支持该速度的机型。不能把所有候选概括为“航程不足”。
 - 返回 `/data/candidates`、`/data/jobs`（求解用编号与名称）、`/data/costs`、`/data/constraints`，可原样用于分配求解。`costs.reachable` 按候选机和作业给出**实际往返转场**可达集合：只有从起飞点飞抵该作业并返回都在航程与时间预算内的作业才列入；不可达作业的转场弧写成 `null`，没有任何可达作业的候选会从成本候选集中移除（见 `reachable_count` / `cost_excluded_count`）。约束保留区域的 `fixed_uav`；**圆形巡逻**要求单机负责，以保留完整圆周；**圆形搜索**会转成外接矩形搜索框，可由两机共担，不强制单机。用户另有数量或候选限制时须一并表达。
@@ -45,9 +47,9 @@ uav_runtime/.venv/bin/python uav_runtime/run.py skills/trajectory-generation/scr
 }
 ```
 
-- `search_timeout` 默认1200秒；航高、圈数、速度和区域沿用成本记录，不能在此覆盖。改这些输入后需要相应的新成本及分配证据。
+- `search_timeout` 默认1200秒，仅覆盖未写该字段的搜索作业；航高、每步类型、圈数、速度、区域和顺序沿用成本记录，不能在此覆盖。改这些输入后需要相应的新成本及分配证据。
 - 校验分配的真实求解输入、结果、索引、预算、成本、约束和访问顺序；不手改归属。按参与机编号依次在基准航高上增加0.3 m，并检查每架机上限；严格固定同高的多机请求不能用该错高策略代替。
-- 返回 `task_key,jobs,assignments,unused,solver`。每项 assignment 含 `uav_id,origin,flight_alt,jobs,steps,estimated_range_m,estimated_battery_after`。steps 为 `transit`、`search` 或 `patrol`，兼容 flight-control 的动作组装输入；搜索步含 `box_min,box_max,timeout_sec`，巡逻步含 `waypoints,laps`。
+- 返回 `task_key,jobs,assignments,unused,solver`。每项 assignment 含 `uav_id,origin,flight_alt,jobs,steps,estimated_range_m,estimated_battery_after`。steps 为 `transit`、`search` 或 `patrol`，兼容 flight-control 的动作组装输入；搜索步含 `box_min,box_max,timeout_sec`，巡逻步含 `waypoints,laps`。同一架机可混合 search 和 patrol 步，按各步类型和参数处理。
 - `summary.assignments` 同时给出每架执行机的 `battery_level`（原始电量）、`flight_remain`（原始剩余航程）、`range_budget/time_budget`（预留后预算）和 `estimated_battery_after`（预计剩余电量）；报告按同一机号直接读取这些值。
 - 最终分区航程须满足输入航程预算且剩余电量大于20%。该估计只覆盖水平转场和覆盖/巡逻长度；不包含起降、搜索超时上界或跟踪占用，`whole_mission_budget_complete=false`，不能称全任务续航已验证。
 

@@ -14,6 +14,8 @@ from uav_runtime.area_route import query_area
 from uav_runtime.direct_path import direct_route
 from uav_runtime.atomic.allocation import compute
 from uav_runtime.atomic.query import rows
+from uav_runtime.capabilities import check_task
+from uav_runtime.seven_geometry import build, costs
 
 
 def environment_report():
@@ -54,7 +56,7 @@ def check_entrypoints():
 
         for script in ("data-query/scripts/prepare_candidates.py", "spatial-compute/scripts/resolve_jobs.py",
                        "mission-orchestration/scripts/allocate.py", "trajectory-generation/scripts/planning_routes.py",
-                       "target-detection/scripts/validate_targets.py"):
+                       "mission-planning/scripts/check_task.py", "target-detection/scripts/validate_targets.py"):
             invoke("skills/" + script, "--help")
         route = invoke("skills/trajectory-generation/scripts/mock_offline_map.py", "query-path",
                        "--start-lon", "0", "--start-lat", "0", "--end-lon", "0.001", "--end-lat", "0",
@@ -77,6 +79,45 @@ def check_entrypoints():
         if validation.get("validated") is not True or validation.get("submitted") is not False:
             raise RuntimeError("动作dry-run入口状态错误")
     return checked
+
+
+def check_multi_step():
+    """Exercise mixed patrol/search steps, per-step parameters and order."""
+    lon, lat = 120.0, 24.0
+    candidates = [{"uav_id": "CHECK-A", "origin": {"longitude": lon, "latitude": lat},
+                   "range_budget": 10000.0, "time_budget": 10000.0,
+                   "flight_remain": 10000.0, "battery": 100.0,
+                   "max_altitude": 500.0, "max_speed": 5.0},
+                  {"uav_id": "CHECK-B", "origin": {"longitude": lon, "latitude": lat},
+                   "range_budget": 10000.0, "time_budget": 10000.0,
+                   "flight_remain": 10000.0, "battery": 100.0,
+                   "max_altitude": 500.0, "max_speed": 5.0}]
+    jobs = [{"job_id": "J1", "name": "patrol", "center": [lon, lat],
+             "shape": "rectangle", "length": 10, "width": 10,
+             "task_type": "patrol", "laps": 2, "fixed_uav": "CHECK-A"},
+            {"job_id": "J2", "name": "search", "center": [lon, lat],
+             "shape": "rectangle", "length": 10, "width": 10,
+             "task_type": "search", "search_timeout": 300, "fixed_uav": "CHECK-B"}]
+    capability = check_task({"steps": [{"job_id": "J1", "task_type": "patrol", "laps": 2},
+                                       {"job_id": "J2", "task_type": "search",
+                                        "search_timeout": 300}], "ordered": True})
+    if capability["route"] != "full" or capability["gaps"]:
+        raise RuntimeError("多步骤能力检查未通过")
+    estimate = costs({"operation": "costs", "candidates": candidates, "jobs": jobs,
+                      "ordered": True})
+    allocation = compute({"candidates": estimate["candidates"], "jobs": estimate["jobs"],
+                          "costs": estimate["costs"], "constraints": estimate["constraints"]})
+    plan = build({"operation": "build", "cost_estimate": estimate,
+                  "allocation": allocation})
+    steps = [(step["type"], step.get("laps"), step.get("timeout_sec"))
+             for assignment in plan["assignments"] for step in assignment["steps"]
+             if step["type"] in ("search", "patrol")]
+    if sorted(step[0] for step in steps) != ["patrol", "search"]:
+        raise RuntimeError("混合步骤未按类型生成")
+    if not any(step[0] == "patrol" and step[1] == 2 for step in steps):
+        raise RuntimeError("巡逻圈数未按步骤保留")
+    if not any(step[0] == "search" and step[2] == 300 for step in steps):
+        raise RuntimeError("搜索时限未按步骤保留")
 
 
 def main():
@@ -102,6 +143,7 @@ def main():
                                 "work_range": [10], "work_time": [10], "reachable": {"CHECK": ["CHECK"]}}})
     if not result["assignments"] or not result["solver_result"]["validation"]["passed"]:
         raise RuntimeError("数值分配求解校验失败")
+    check_multi_step()
     facts = {}
     if args.data:
         required = {
@@ -117,7 +159,8 @@ def main():
                 raise ValueError(f"{table} 缺少字段 {sorted(fields - records[0].keys())}")
         if not all(facts.values()):
             raise ValueError("三个库都需要有可用记录")
-    print(json.dumps({"status": "OK", "mock": True, "solver": result["solver"], "database_rows": facts,
+    print(json.dumps({"status": "OK", "mock": True, "solver": result["solver"],
+                      "multi_step": "ok", "database_rows": facts,
                       "entrypoints_checked": entrypoints, "environment": environment_report()},
                      ensure_ascii=False))
     return 0
