@@ -15,13 +15,13 @@ description: 用只读 SQL 查询资源库、状态库和地点库，保持记�
 
 ```bash
 uav_runtime/.venv/bin/python uav_runtime/run.py skills/data-query/scripts/query_location.py \
-  --sql "SELECT * FROM geo_library WHERE region_name = '教学楼' OR alias LIKE '%教学楼%' LIMIT 3"
+  --sql "SELECT * FROM geo_library WHERE region_name = '教学楼' OR instr(';' || COALESCE(alias,'') || ';',';教学楼;') > 0"
 ```
 
 - `--sql` 只能是一条 `SELECT` 或 `WITH … SELECT`，外层双引号、内层单引号；每个脚本只能查自己的表。
 - 按需要选字段，不必 `SELECT *`（地点库除外，查地点时可取全部字段）。
 - 互不依赖的查询放在同一轮并行发出。
-- 地点先按全名和完整别名匹配，简称再结合用户已给地域、相邻步骤及会话上下文收窄。唯一匹配后直接使用坐标和登记区域；其余所需事实从对应库补齐。宽泛查询返回多行时先筛选相关记录。
+- 地点一次查询同时匹配正式名和完整别名（不要先只查 `region_name`）；唯一命中直接使用坐标和登记区域，多个再结合已给地域、相邻步骤及会话上下文收窄，仍有多个才列出询问；简称未命中时结合地域检索，不用宽泛 `LIKE`+`LIMIT` 决定地点。其余所需事实从对应库补齐。
 
 ## 表字段
 
