@@ -36,12 +36,13 @@ def region_route(area, altitude, task_type):
 
 
 def cost_geometry(prepared):
-    task_type, altitude = prepared["task_type"], prepared["flight_alt"]
-    routes = [region_route(job, altitude, task_type) for job in prepared["jobs"]]
-    work_range = [r["path_length"] * prepared["laps"] for r in routes]
+    altitude = prepared["flight_alt"]
+    routes = [region_route(job, altitude, job["task_type"]) for job in prepared["jobs"]]
+    work_range = [r["path_length"] * job["laps"] for r, job in zip(routes, prepared["jobs"])]
     speeds = prepared["speeds"]
     job_ids = [job["job_id"] for job in prepared["jobs"]]
-    costs = {"work_range": work_range, "work_time": [d / speeds["work"] for d in work_range],
+    costs = {"work_range": work_range,
+             "work_time": [d / job["work_speed"] for d, job in zip(work_range, prepared["jobs"])],
              "transfer_range": {}, "transfer_time": {}, "reachable": {}}
     for candidate in prepared["candidates"]:
         uid = candidate["uav_id"]
@@ -107,27 +108,30 @@ def search_box(zone, altitude):
 
 def build_steps(prepared, ordered, origin, altitude, timeout):
     """Connect the actual first/last waypoints of consecutive jobs and the home point."""
-    task_type = prepared["task_type"]
     home = previous = lon_lat(origin)
     steps = []
-    transit_range = work_range = 0.0
+    transit_range = work_range = work_time = 0.0
     for zone in ordered:
+        task_type = zone["task_type"]
         route = region_route(zone, altitude, task_type)
         waypoints = route["waypoints"]
         transfer = direct_route(previous, lon_lat(waypoints[0]), altitude)
         transit_range += transfer["one_way_distance"]
         job_id = zone["job_id"]
         steps.append({"type": "transit", "to": job_id, "waypoints": transfer["go_waypoints"]})
-        work_range += route["path_length"] * prepared["laps"]
+        lap_length = route["path_length"] * zone["laps"]
+        work_range += lap_length
+        work_time += lap_length / zone["work_speed"]
         operation = {"type": task_type, "job_id": job_id,
                      "name": zone.get("name", job_id), "zone": zone["label"]}
         if task_type == "patrol":
-            operation.update(waypoints=waypoints, laps=prepared["laps"])
+            operation.update(waypoints=waypoints, laps=zone["laps"])
         else:
             low, high = search_box(zone, altitude)
-            operation.update(box_min=low, box_max=high, timeout_sec=timeout, waypoints=waypoints)
+            operation.update(box_min=low, box_max=high,
+                             timeout_sec=zone.get("search_timeout", timeout), waypoints=waypoints)
         steps.append(operation)
         previous = lon_lat(waypoints[-1])
     transfer = direct_route(previous, home, altitude)
     steps.append({"type": "transit", "to": "home", "waypoints": transfer["go_waypoints"]})
-    return steps, transit_range + transfer["one_way_distance"], work_range
+    return steps, transit_range + transfer["one_way_distance"], work_range, work_time

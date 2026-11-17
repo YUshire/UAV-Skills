@@ -71,7 +71,7 @@ metadata:
 - “至少找出N个相同特征的对象”需要物理实体去重计数，不能复制同一描述N次作为N个目标。当前目标清单不保证这项数量条件；按 target-detection 说明边界。不同外观的同类目标仍可分别搜索。
 - “必须保证含往返、起降的总时长”与每区 `search_timeout` 不同；当前水平成本与预算不能提供全任务保证。不能把默认速度下的估计超限说成所有允许参数下都物理无解，也不能承诺提高速度后必然满足总时限。
 - 用户指定跟踪时长时，先说明当前 profile 固定、不支持自定义；不能把默认 profile 或搜索时限当成该时长。未满足的方案只能明确标作待用户接受的备选，不能称原请求已完整完成。
-- 纯飞行/多途经点尚未接入当前完整任务入口和中央作业契约；直接说明接口缺口，并用单项航迹工具完成可支持的路径预览，不追问“到了以后做什么”。混合任务类型、指定先后顺序同样须核对接口是否能完整表达；不通过拆单返航、改任务类型或重排顺序替代原请求。
+- 纯飞行/多途经点尚未接入当前完整任务入口和中央作业契约；直接说明接口缺口，并用单项航迹工具完成可支持的路径预览，不追问“到了以后做什么”。混合任务类型和同一架机内的步骤顺序已支持；固定到不同无人机的步骤先后顺序不保证，按 check_task.py 的 gaps 说明。不通过拆单返航、改任务类型或重排顺序替代原请求。
 
 **候选机**：
 - 按语义识别机号的角色：明确派遣的机号或候选列表才限定执行机；用作位置参照、查询对象或资源说明的机号不等于执行机。例如“在 UAV-002 左前方探索”中的 UAV-002 只是位置参照。
@@ -90,13 +90,14 @@ metadata:
 
 根据用户所需结果和已有数据，补齐当前缺少的部分；单项请求在该项完成后即可交付，不要求经过完整链路。
 
-识别为执行请求后、开始规划前，按 AGENTS.md 做环境检查。`online_execution_configured=false` 时，完成当前可支持的离线规划和校验，记录缺失组件，按第五节用日常语言说明未下发的原因；无需让用户再次确认执行意图。环境接通后，依据最新机况、地图和中央预检判断方案是否需要重算。混合类型、纯途经或固定顺序在接口无法表达时，直接做可支持的分段预览，不把它们全部填为一种区域作业再尝试求解。
+识别为执行请求后、开始规划前，按 AGENTS.md 做环境检查。`online_execution_configured=false` 时，完成当前可支持的离线规划和校验，记录缺失组件，按第五节用日常语言说明未下发的原因；无需让用户再次确认执行意图。环境接通后，依据最新机况、地图和中央预检判断方案是否需要重算。多步骤/混合类型先按 [references/combined-tasks.md](references/combined-tasks.md) 整理并用 `check_task.py` 核对；跨机固定顺序等接口无法表达的部分直接说明缺口，不把它们全部填为一种区域作业再尝试求解。
 
 | 当前缺少的内容 | 使用已有技能 | 返回内容 |
 |---|---|---|
 | 地点、状态、资源事实 | data-query 原SQL查询 | 真实记录 |
 | 合格候选机与预算 | data-query 的 prepare_candidates.py | candidates、excluded |
 | 明确的数值区域 | spatial-compute 的 resolve_jobs.py；相对位置先用 calc_offset.py | jobs |
+| 多步骤能力核对 | mission-planning 的 check_task.py | 类型/参数/顺序检查、gaps和route |
 | 作业与转场成本 | trajectory-generation 的 planning_routes.py，operation=costs | candidates、jobs、costs、constraints及prepared |
 | 无人机归属和访问顺序 | mission-orchestration 的 allocate.py | assignments、owners、unused及求解证据 |
 | 分配后的具体航迹和航高 | trajectory-generation 的 planning_routes.py，operation=build | 原始WGS84航点、每机steps、航程估计 |
@@ -107,7 +108,8 @@ metadata:
 
 完整只规划方案需按 flight-control 对每架机做dry-run；有目标时按 target-detection 做本地目标校验，保存完整动作和各项验证范围，面向用户按第五节交付。在线环境齐全的执行请求使用组装好的原始 WGS84 动作，继续本节中央下发操作；只读计算和待确认方案不启动感知。
 
-**整理作业**：每个区域一个作业。
+**整理作业**：一个动作步骤一个作业；同一区域的不同动作拆成多个作业。
+- 每步分别写 `task_type`（`search`/`patrol`）、`laps`（只巡逻）、`search_timeout`（只搜索）；同一区域先巡逻再搜索时用两个不同 `job_id`。用户要求“先……再……”时在成本输入加 `"ordered": true`。多步骤或混合类型先读 [references/combined-tasks.md](references/combined-tasks.md)，并用 `check_task.py` 分别核对类型、参数和顺序。
 - 地名：`{"place":"教学楼"}`。用户指定了形状、尺寸就一并写入，如 `{"place":"教学楼","shape":"circle","radius":5}`。
 - 经纬度：`{"name":"…","center_lon":…,"center_lat":…,"shape":"circle","radius":…}` 或 `"shape":"rectangle","length":…,"width":…`。`name` 写用户对该区域的叫法，没有就写“区域1”“区域2”。
 - 相对位置：按第二节“相对基准”确定参照，再用 data-query 查相应记录、用 spatial-compute 的 `calc_offset.py` 算出中心。地点基准有登记区域时用区域中心 `region_center_*`，没有时用该地点的 `longitude/latitude`。偏移后的新区域从用户描述和上下文取得形状、尺寸。

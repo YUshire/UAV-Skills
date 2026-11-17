@@ -36,7 +36,7 @@ uav_runtime/.venv/bin/python uav_runtime/run.py skills/flight-control/scripts/as
 对任务航迹 `planning_routes.py` 的 `build` 结果中的每个 `assignments[i]`（完整数据在返回文件的 `data` 中）：
 
 1. `task_id` = `<task_key>-<uav_id>`，例如 `T1021153012a3f2-UAV-003`。
-2. 依次写：`arm` → `takeoff`（`altitude` = `flight_alt`）→ 按 `steps` 顺序转换 → `land`：
+2. 依次写：`arm` → `takeoff`（`altitude` = `flight_alt`）→ 按 `steps` 顺序转换 → `land`。同一架机的 `steps` 可混合 `search` 和 `patrol`，各步按自己的类型、`laps` 和 `timeout_sec` 组装，不套用整任务的单一类型：
    - `transit` → `follow_path`，`waypoints` 原样复制；
    - `search` → `fuel_explore`，复制 `box_min`、`box_max`、`timeout_sec`；
    - `patrol` → `patrol_move`，`waypoints` 原样复制，重复 `laps` 次（每圈一条动作）。
