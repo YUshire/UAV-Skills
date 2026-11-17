@@ -40,7 +40,7 @@ uav_runtime/.venv/bin/python uav_runtime/run.py skills/data-query/scripts/query_
 
 **uav_status**（状态记录）
 
-本表没有 `alias`。用户给“107号机”这类别名时，从 `uav_resource.alias` 查得 `uav_id`，再以该编号查询状态；已明确 `UAV-107` 时直接按编号查询。
+本表没有 `alias`，不要在本表按别名查。用户直接给出编号（`307`、`307号机`、`UAV-307`、`307号`）时，统一归一化为 `UAV-307`，直接按 `uav_id` 查询；多个编号用 `IN ('UAV-307','UAV-308','UAV-309')`，不要查 `uav_status.alias`。只有非编号的名称/别名（如“侦察一号”）才先从 `uav_resource.alias` 查得 `uav_id`，再按编号查状态；`uav_resource` 本身可直接按 `alias` 或 `uav_id` 查。例：`SELECT uav_id, mission_status, battery_level, flight_remain FROM uav_status WHERE uav_id IN ('UAV-307','UAV-308','UAV-309')`。
 
 | 字段 | 说明 |
 |---|---|
@@ -90,7 +90,7 @@ uav_runtime/.venv/bin/python uav_runtime/run.py skills/data-query/scripts/prepar
 
 | 状态 | 处理 |
 |---|---|
-| `NOT_FOUND` | 核对全名、别名和已给地域后补查；仍无记录且缺任务必需事实时，询问具体地点或缺项 |
+| `NOT_FOUND` | 机号先归一化为 `UAV-###` 再查，不要用裸数字或 `uav_status.alias`；地点/别名核对全名和已给地域后补查；仍无记录且缺任务必需事实时，询问具体地点或缺项 |
 | `INVALID_ARGUMENT` | 对照上面的表名和字段修正 SQL，最多重试一次 |
 | `DATABASE_ERROR`、`IO_ERROR`、`ERROR` | 报告数据库或文件错误，停止依赖它的步骤 |
 | `truncated=true` | 结果超过 100 行：收窄条件或分页，不把第一批当作全部 |
