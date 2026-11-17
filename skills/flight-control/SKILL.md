@@ -31,7 +31,7 @@ uav_runtime/.venv/bin/python uav_runtime/run.py skills/flight-control/scripts/as
   --input '{"plan":{"ref":"<build实际返回的artifact_file>","select":"/data"}}'
 ```
 
-返回 `artifact_file` 和每架机的报告摘要。原始 WGS84 序列在 `/data/participants/<索引>/raw_batch`；已转换的本地序列在同一项的 `dry_run.batch`。这些字段供内部取数与后续调用；普通回复按 mission-planning 第五节说明任务安排和实际状态，需要文件时提供“完整方案”链接。电量、航程取 `summary.participants`，动作数只在用户询问动作时展示。此脚本只做离线校验，`submitted=false`。以下是它采用的映射规则。
+返回 `artifact_file` 和每架机的报告摘要。原始 WGS84 序列在 `/data/participants/<索引>/raw_batch`；已转换的本地序列在同一项的 `dry_run.batch`。电量、航程取 `summary.participants`。`UAV_SHOW_ACTIONS` 开关默认 `compact`：`summary.participants[*].actions` 给出动作序列，最终回复用 JSON 代码块展示，长航点数组折叠为 `count/first/last`；设为 `full` 时 `actions` 带完整 `raw_batch` 并附 `local_batch`（大计划可能被截断）；设为 `0` 关闭，只报摘要。普通回复其余部分按 mission-planning 第五节说明任务安排和实际状态，需要文件时提供“完整方案”链接。此脚本只做离线校验，`submitted=false`。以下是它采用的映射规则。
 
 对任务航迹 `planning_routes.py` 的 `build` 结果中的每个 `assignments[i]`（完整数据在返回文件的 `data` 中）：
 

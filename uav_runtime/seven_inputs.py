@@ -115,8 +115,7 @@ def prepare_candidates(data):
                          'bbox_input_count': bbox_input_count if spatial_filter else None,
                          'circle_excluded_count': circle_excluded,
                          'flight_alt': altitude,
-                         'spatial_filter': spatial_filter,
-                         'sample_uav_ids': [row['uav_id'] for row in candidates[:5]]}}
+                         'spatial_filter': spatial_filter}}
 
 
 def resolve_jobs(data):
