@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """从本次 build 产物组装原始动作、离线校验，并保存完整序列及报告。"""
 from copy import deepcopy
+import os
 from pathlib import Path
 import sys
 
@@ -11,6 +12,22 @@ from submit_queue_batch import ValidationError, validate_batch
 
 REPORT_FIELDS = ("uav_id", "flight_alt", "jobs", "battery_level", "flight_remain",
                  "range_budget", "time_budget", "estimated_range_m", "estimated_battery_after")
+SHOW_ACTIONS = os.environ.get("UAV_SHOW_ACTIONS", "compact").strip().lower()
+
+
+def _actions_view(raw):
+    """Show the assembled sequence without repeating long waypoint arrays."""
+    view = []
+    for action in raw:
+        params = deepcopy(action.get("params", {}))
+        waypoints = params.get("waypoints")
+        if isinstance(waypoints, list):
+            params["waypoints"] = {"count": len(waypoints),
+                                   "first": waypoints[0] if waypoints else None,
+                                   "last": waypoints[-1] if waypoints else None}
+        view.append({"cmd": action["cmd"], "task_id": action["task_id"],
+                     "step_id": action["step_id"], "params": params})
+    return view
 
 
 def compute(request):
@@ -69,6 +86,10 @@ def compute(request):
             raise AtomicError("INVALID_ARGUMENT", str(exc), uav_id=uid) from exc
         report = {key: deepcopy(required(assignment, key)) for key in REPORT_FIELDS}
         report.update(action_count=len(batch), validated=True, submitted=False)
+        if SHOW_ACTIONS not in ("0", "false", "off", "no"):
+            report["actions"] = deepcopy(raw) if SHOW_ACTIONS == "full" else _actions_view(raw)
+            if SHOW_ACTIONS == "full":
+                report["local_batch"] = deepcopy(batch)
         participants.append({"uav_id": uid, "task_id": task_id, "origin": deepcopy(origin),
                              "raw_batch": raw, "dry_run": {"status": "OK", "validated": True,
                              "submitted": False, "action_count": len(batch), "batch": batch}, "report": report})
@@ -81,6 +102,7 @@ def compute(request):
                           ("task_key", "validated", "submitted", "validated_for_execution", "mock", "map_used",
                            "whole_mission_budget_complete", "budget_scope")}
     output["_summary"]["participants"] = [p["report"] for p in participants]
+    output["_summary"]["show_actions"] = SHOW_ACTIONS
     return output
 
 
