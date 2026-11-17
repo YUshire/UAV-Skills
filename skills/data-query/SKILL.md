@@ -82,7 +82,7 @@ uav_runtime/.venv/bin/python uav_runtime/run.py skills/data-query/scripts/prepar
 
 `payload` 数组各项必须同时满足，每项按状态记录字符串包含匹配，不表示多个名称任选其一。用户只要求红外能力时可用 `["红外"]` 匹配“红外相机”或“高清+红外”；不能把两种替代名称同时放入数组，变成额外的双重要求。具体载荷不明时先查询原记录，不靠探测距离推断。
 
-完整结果在 artifact：`candidates` 包含机号、起飞原点、原始电量/航程/升限记录及 `range_budget`（米）、`time_budget`（秒）；`excluded` 列排除原因。返回的 summary 只给 `candidate_count`、`excluded_count`、`bbox_input_count`、`circle_excluded_count`、`spatial_filter` 和最多 5 个 `sample_uav_ids`，不回传全量明细。预算保留20%电量，由工具计算，不把 `flight_remain` 或分钟制 `max_endurance` 直接改名作预算。本入口不查询任务地点、不计算路径、不决定归属。
+完整结果在 artifact：`candidates` 包含机号、起飞原点、原始电量/航程/升限记录及 `range_budget`（米）、`time_budget`（秒）；`excluded` 列排除原因。返回的 summary 只给 `candidate_count`、`excluded_count`、`bbox_input_count`、`circle_excluded_count` 和 `spatial_filter`，不回传全量明细。预算保留20%电量，由工具计算，不把 `flight_remain` 或分钟制 `max_endurance` 直接改名作预算。本入口不查询任务地点、不计算路径、不决定归属。
 
 ## SQL 返回与异常
 
