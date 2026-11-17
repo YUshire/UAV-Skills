@@ -1,4 +1,5 @@
 """Geometric costs and route steps assembled from explicit areas and WGS84 points."""
+import math
 from types import SimpleNamespace
 
 from uav_runtime.area_route import LocalFrame, query_area
@@ -12,8 +13,36 @@ def lon_lat(waypoint):
     return waypoint["longitude"], waypoint["latitude"]
 
 
-def region_route(area, altitude, task_type):
+def job_radius(job):
+    """Farthest horizontal distance from the job centre to its action area."""
+    if job["shape"] == "circle":
+        return job["radius"] * (2 ** 0.5 if job["task_type"] == "search" else 1.0)
+    return (job["length"] ** 2 + job["width"] ** 2) ** 0.5 / 2
+
+
+def search_lane_m(flight_alt, fov_deg):
+    """Ground strip width: lane = 2 * height * tan(FOV / 2)."""
+    return 2 * flight_alt * math.tan(math.radians(fov_deg / 2))
+
+
+def search_coverage_m(length, width, lane):
+    """Boustrophedon length using the long side as the strip direction.
+
+    Matches the data-construction figure: n = ceil(short / lane),
+    coverage = n * long + (n - 1) * lane.
+    """
+    long_side, short_side = max(length, width), min(length, width)
+    lanes = max(1, math.ceil(round(short_side / lane, 9)))
+    return lanes * long_side + (lanes - 1) * lane
+
+
+def region_route(area, altitude, task_type, lane=None):
     """Use the public area query for both costing and final trajectories."""
+    if task_type == "search" and area["shape"] == "circle":
+        # The search action consumes an axis-aligned box. Cost the bounding
+        # square so the estimate matches the executed search area.
+        side = 2 * area["radius"]
+        area = {**area, "shape": "rectangle", "length": side, "width": side}
     center = area["center"]
     start = center
     # A registered entrance can be outside this job (especially after a split).
@@ -29,16 +58,27 @@ def region_route(area, altitude, task_type):
 
     args = SimpleNamespace(center_lon=center[0], center_lat=center[1], center_alt=0.0,
                            flight_alt=altitude, shape=area["shape"], length=area.get("length"),
-                           width=area.get("width"), radius=area.get("radius"), lane=2.0,
+                           width=area.get("width"), radius=area.get("radius"),
+                           lane=2.0 if lane is None else lane,
                            mode="boundary" if task_type == "patrol" else "coverage",
                            start_lon=start[0], start_lat=start[1])
     return query_area(args)
 
 
-def cost_geometry(prepared):
+def cost_geometry(prepared, routes=None, work_range=None):
     altitude = prepared["flight_alt"]
-    routes = [region_route(job, altitude, job["task_type"]) for job in prepared["jobs"]]
-    work_range = [r["path_length"] * job["laps"] for r, job in zip(routes, prepared["jobs"])]
+    if routes is None:
+        routes = [region_route(job, altitude, job["task_type"], job.get("search_lane_m"))
+                  for job in prepared["jobs"]]
+    if work_range is None:
+        work_range = []
+        for route, job in zip(routes, prepared["jobs"]):
+            if job["task_type"] == "search" and job["shape"] == "rectangle":
+                base = search_coverage_m(job["length"], job["width"],
+                                         job.get("search_lane_m") or 2.0)
+            else:
+                base = route["path_length"]
+            work_range.append(base * job["laps"])
     speeds = prepared["speeds"]
     job_ids = [job["job_id"] for job in prepared["jobs"]]
     costs = {"work_range": work_range,
@@ -68,11 +108,17 @@ def cost_geometry(prepared):
         # behaviour) incorrectly marked far jobs reachable for aircraft that
         # only passed screening for a different, nearer job.
         reachable = []
-        for index, job_id in enumerate(job_ids):
+        radius_limit = candidate.get("max_flight_radius")
+        for index, job in enumerate(prepared["jobs"]):
+            job_id = job["job_id"]
             round_range = distances[0][index + 1] + distances[index + 1][0]
             round_time = times[0][index + 1] + times[index + 1][0]
+            center_distance = direct_route(home, (job["center"][0], job["center"][1]),
+                                           altitude, points=0)["one_way_distance"]
+            radius_ok = radius_limit is None or (
+                center_distance + job_radius(job) <= radius_limit + 1e-6)
             if (round_range <= candidate["range_budget"] + 1e-6
-                    and round_time <= candidate["time_budget"] + 1e-6):
+                    and round_time <= candidate["time_budget"] + 1e-6 and radius_ok):
                 reachable.append(job_id)
         costs["reachable"][uid] = reachable
         # Unreachable jobs must be null arcs, not merely large costs. The MILP
@@ -113,13 +159,18 @@ def build_steps(prepared, ordered, origin, altitude, timeout):
     transit_range = work_range = work_time = 0.0
     for zone in ordered:
         task_type = zone["task_type"]
-        route = region_route(zone, altitude, task_type)
+        route = region_route(zone, altitude, task_type, zone.get("search_lane_m"))
         waypoints = route["waypoints"]
         transfer = direct_route(previous, lon_lat(waypoints[0]), altitude)
         transit_range += transfer["one_way_distance"]
         job_id = zone["job_id"]
         steps.append({"type": "transit", "to": job_id, "waypoints": transfer["go_waypoints"]})
-        lap_length = route["path_length"] * zone["laps"]
+        if task_type == "search" and zone["shape"] == "rectangle":
+            base = search_coverage_m(zone["length"], zone["width"],
+                                     zone.get("search_lane_m") or 2.0)
+        else:
+            base = route["path_length"]
+        lap_length = base * zone["laps"]
         work_range += lap_length
         work_time += lap_length / zone["work_speed"]
         operation = {"type": task_type, "job_id": job_id,

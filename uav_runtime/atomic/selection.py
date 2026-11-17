@@ -47,6 +47,17 @@ def compute(data):
                     reasons.append(f"{key} 记录无效")
             battery = numbers.get("battery_level", 0)
             health = numbers.get("health_score", 0)
+            # A per-aircraft reserve is a safety floor, not a replacement for
+            # the 20% minimum; an invalid record is excluded rather than guessed.
+            reserve = RESERVE_BATTERY_PERCENT
+            raw_reserve = row.get("return_reserve")
+            if raw_reserve is not None:
+                try:
+                    reserve = max(RESERVE_BATTERY_PERCENT, finite(raw_reserve, "return_reserve"))
+                except AtomicError:
+                    reasons.append("返航预留记录无效")
+            if battery > 0 and reserve >= battery:
+                reasons.append("返航预留不低于当前电量")
             if not 30 < battery <= 100:
                 reasons.append("电量须大于 30% 且不超过 100%")
             if not 60 < health <= 100:
@@ -75,15 +86,28 @@ def compute(data):
             continue
         item = deepcopy(row)
         item.update(numbers)
-        item["range_budget"] = available_range_m(numbers["flight_remain"], battery)
-        item["time_budget"] = available_time_s(numbers["max_endurance"], battery)
+        item["reserve_battery_percent"] = reserve
+        item["range_budget"] = available_range_m(numbers["flight_remain"], battery, reserve)
+        item["time_budget"] = available_time_s(numbers["max_endurance"], battery, reserve)
         candidates.append(item)
+    altitudes = []
+    for row in records.values():
+        try:
+            value = finite(row.get("max_altitude"), "max_altitude")
+        except AtomicError:
+            continue
+        if value > 0:
+            altitudes.append(value)
+    max_recorded_altitude = max(altitudes) if altitudes else None
     if requested and excluded and not candidates:
-        raise AtomicError("CANDIDATE_EXCLUDED", "指定无人机未通过筛选", excluded=excluded)
+        raise AtomicError("CANDIDATE_EXCLUDED", "指定无人机未通过筛选", excluded=excluded,
+                          max_recorded_altitude=max_recorded_altitude)
     if not candidates:
-        raise AtomicError("NO_CANDIDATE", "没有合格候选机", excluded=excluded)
+        raise AtomicError("NO_CANDIDATE", "没有合格候选机", excluded=excluded,
+                          max_recorded_altitude=max_recorded_altitude)
     summary = {"candidates": [{"uav_id": row["uav_id"], "range_budget": row["range_budget"],
-                                "time_budget": row["time_budget"], "max_altitude": row["max_altitude"]}
+                                "time_budget": row["time_budget"], "max_altitude": row["max_altitude"],
+                                "reserve_battery_percent": row["reserve_battery_percent"]}
                                for row in candidates], "excluded": excluded}
     return {"status": "OK", "candidates": candidates, "excluded": excluded,
             "flight_alt": altitude, "reserve_battery_percent": RESERVE_BATTERY_PERCENT, "_summary": summary}

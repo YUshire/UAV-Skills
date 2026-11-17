@@ -103,7 +103,34 @@ def prepare_candidates(data):
     relevant_missing = [row for row in missing if not data.get('uav_ids') or row['uav_id'] in data['uav_ids']]
     excluded = selected['excluded'] + relevant_missing
     if data.get('uav_ids') and excluded:
-        raise AtomicError('CANDIDATE_EXCLUDED', '用户点名的候选机未全部通过筛选', excluded=excluded)
+        # Report other usable aircraft so a named-aircraft failure does not
+        # read as "the whole fleet cannot do it".
+        alternative_input = {key: value for key, value in selection_input.items() if key != 'uav_ids'}
+        try:
+            alternatives = select(dict(alternative_input, fleet=fleet, flight_alt=altitude))['candidates']
+        except AtomicError:
+            alternatives = []
+        available = [{key: row.get(key) for key in
+                      ('uav_id', 'range_budget', 'time_budget', 'max_altitude', 'max_speed',
+                       'reserve_battery_percent')}
+                     for row in alternatives]
+        available.sort(key=lambda row: row.get('range_budget') or 0, reverse=True)
+        altitudes = []
+        for row in fleet:
+            try:
+                altitudes.append(number(row.get('max_altitude'), 'max_altitude', True))
+            except AtomicError:
+                continue
+        max_recorded_altitude = max(altitudes) if altitudes else None
+        message = '用户点名的候选机未全部通过筛选'
+        message += (f'；另有 {len(available)} 架可用候选可作替代' if available
+                    else '；当前筛选条件下没有替代候选')
+        if max_recorded_altitude is not None and max_recorded_altitude < altitude:
+            message += (f'；记录中的最高升限为 {max_recorded_altitude:g} m，'
+                        f'低于请求的 {altitude:g} m')
+        raise AtomicError('CANDIDATE_EXCLUDED', message, excluded=excluded,
+                          available_count=len(available), available_candidates=available[:20],
+                          max_recorded_altitude=max_recorded_altitude)
     candidates = deepcopy(selected['candidates'])
     for row in candidates:
         row['battery'] = row['battery_level']

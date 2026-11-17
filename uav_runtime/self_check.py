@@ -1,6 +1,7 @@
 """Check mock geometry, the real numerical solver and optionally the three databases."""
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -13,7 +14,11 @@ sys.path.insert(0, str(ROOT))
 from uav_runtime.area_route import query_area
 from uav_runtime.direct_path import direct_route
 from uav_runtime.atomic.allocation import compute
+from uav_runtime.atomic.common import AtomicError
 from uav_runtime.atomic.query import rows
+from uav_runtime.atomic.selection import compute as select_candidates
+from uav_runtime.planning_geometry import (region_route, search_coverage_m,
+                                           search_lane_m)
 from uav_runtime.capabilities import check_task
 from uav_runtime.seven_geometry import build, costs
 
@@ -120,6 +125,77 @@ def check_multi_step():
         raise RuntimeError("搜索时限未按步骤保留")
 
 
+def check_alternatives():
+    """Default speed may fail while a bounded speed makes the task feasible."""
+    def candidate(uid, max_speed, radius=None):
+        return {"uav_id": uid, "origin": {"longitude": 0.0, "latitude": 0.0},
+                "range_budget": 10000.0, "time_budget": 1000.0,
+                "flight_remain": 10000.0, "battery": 100.0,
+                "max_altitude": 500.0, "max_speed": max_speed,
+                "max_flight_radius": radius}
+
+    job = {"job_id": "J1", "name": "alternatives", "center": [0.01, 0.0],
+           "shape": "rectangle", "length": 10, "width": 10,
+           "task_type": "patrol", "laps": 1}
+    try:
+        costs({"operation": "costs", "candidates": [candidate("CHECK-SLOW", 10.0)],
+               "jobs": [job]})
+        raise RuntimeError("默认速度应当不可行")
+    except AtomicError as exc:
+        if exc.code != "NO_FEASIBLE_ALLOCATION":
+            raise
+        alternatives = exc.details["candidate_screening"]["alternatives"]
+        if alternatives["feasible_count"] != 1:
+            raise RuntimeError("默认速度失败时未给出可用速度备选")
+        top = alternatives["items"][0]
+        if not 2.0 < top["suggested_speed_mps"] < 3.0 or not top["feasible_with_speed"]:
+            raise RuntimeError("速度备选的建议值不正确")
+    try:
+        costs({"operation": "costs", "candidates": [candidate("CHECK-MAX", 2.0)],
+               "jobs": [job]})
+        raise RuntimeError("最大速度不足时应当不可行")
+    except AtomicError as exc:
+        alternatives = exc.details["candidate_screening"]["alternatives"]
+        if alternatives["feasible_count"] != 0:
+            raise RuntimeError("最大速度不足时不应给出可行速度备选") from exc
+    try:
+        costs({"operation": "costs", "candidates": [candidate("CHECK-RADIUS", 10.0, 500.0)],
+               "jobs": [job]})
+        raise RuntimeError("超出最大飞行半径时应当不可行")
+    except AtomicError as exc:
+        if "最大飞行半径" not in str(exc):
+            raise RuntimeError("最大飞行半径失败未给出明确原因") from exc
+
+    # A circular search is executed as its axis-aligned box, so costing must
+    # use the same geometry.
+    circle = {**job, "shape": "circle", "radius": 5}
+    circle.pop("length")
+    circle.pop("width")
+    box = region_route(circle, 1.2, "search")
+    rectangle = region_route({**job, "shape": "rectangle", "length": 10, "width": 10}, 1.2, "search")
+    if abs(box["path_length"] - rectangle["path_length"]) > 1e-6:
+        raise RuntimeError("圆形搜索成本与执行搜索框不一致")
+
+    fleet = [{"uav_id": "CHECK-RESERVE", "mission_status": "空闲", "battery_level": 80.0,
+              "health_score": 90.0, "flight_remain": 10000.0, "max_altitude": 500.0,
+              "max_endurance": 100.0, "max_speed": 10.0, "return_reserve": 25.0,
+              "payload_status": "", "origin": {"longitude": 0.0, "latitude": 0.0}}]
+    selected = select_candidates({"fleet": fleet, "flight_alt": 1.2})["candidates"][0]
+    if abs(selected["range_budget"] - 6875.0) > 1e-6:
+        raise RuntimeError("逐机返航预留未进入航程预算")
+    if abs(selected["time_budget"] - 3300.0) > 1e-6:
+        raise RuntimeError("逐机返航预留未进入时间预算")
+
+    # The figure's example: 500x300, lane 75 m, 4 lanes, coverage 2,225 m.
+    fov = math.degrees(2 * math.atan(75 / (2 * 50)))
+    if abs(search_lane_m(50, fov) - 75) > 1e-6:
+        raise RuntimeError("航带公式与图示不一致")
+    if abs(search_coverage_m(500, 300, 75) - 2225) > 1e-6:
+        raise RuntimeError("覆盖航线公式与图示不一致")
+    if abs(search_lane_m(1.2, 89) - 2.358473431477656) > 1e-6:
+        raise RuntimeError("任务航高下的航带计算不正确")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data", action="store_true")
@@ -144,6 +220,7 @@ def main():
     if not result["assignments"] or not result["solver_result"]["validation"]["passed"]:
         raise RuntimeError("数值分配求解校验失败")
     check_multi_step()
+    check_alternatives()
     facts = {}
     if args.data:
         required = {
