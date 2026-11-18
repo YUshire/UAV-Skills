@@ -74,6 +74,18 @@ def _prepared(request, candidate_limit=64):
             finite(candidate["max_flight_radius"], uid + ".max_flight_radius", True)
         if candidate.get("reserve_battery_percent") is not None:
             finite(candidate["reserve_battery_percent"], uid + ".reserve_battery_percent", True)
+        if speed is not None:
+            candidate["planning_speed"] = speed
+            candidate["speed_source"] = "user"
+        else:
+            try:
+                candidate["planning_speed"] = finite(candidate.get("cruise_speed"),
+                                                     "cruise_speed", positive=True)
+                candidate["speed_source"] = "cruise_speed"
+            except AtomicError:
+                candidate["planning_speed"] = 1.2
+                candidate["speed_source"] = "default_1.2"
+    min_planning = min(candidate["planning_speed"] for candidate in candidates)
     for job in jobs:
         center = require(required(job, "center"), "jobs.center", list)
         if len(center) != 2:
@@ -98,7 +110,9 @@ def _prepared(request, candidate_limit=64):
             raise AtomicError("INVALID_ARGUMENT", "job.laps 须为正整数且只用于巡逻", job_id=job["job_id"])
         job["task_type"] = job_type
         job["laps"] = job_laps
-        job["work_speed"] = speed or (1.2 if job_type == "patrol" else 0.6)
+        fixed_speed = next((candidate["planning_speed"] for candidate in candidates
+                            if candidate["uav_id"] == job.get("fixed_uav")), None)
+        job["work_speed"] = speed or fixed_speed or min_planning
         if "search_timeout" in job:
             job["search_timeout"] = finite(job["search_timeout"], "jobs.search_timeout", True)
             if job_type != "search":
@@ -128,10 +142,10 @@ def _prepared(request, candidate_limit=64):
             fov = default_fov
         job["fov_deg"] = fov
         job["search_lane_m"] = search_lane_m(altitude, fov)
-    work_speeds = [job["work_speed"] for job in jobs]
+    planning_speeds = [candidate["planning_speed"] for candidate in candidates]
     return {"candidates": candidates, "jobs": jobs, "task_type": task_type,
             "flight_alt": altitude, "laps": laps, "ordered": ordered,
-            "speeds": {"transit": speed or 1.2, "work": max(work_speeds)},
+            "speeds": {"transit": min(planning_speeds), "work": max(planning_speeds)},
             "requested_speed": speed}
 
 
@@ -165,6 +179,8 @@ def _nearest_entry(candidate, item):
              "radius_ok": bound.get("radius_ok", True),
              "speed_ok": item.get("speed_ok", True),
              "max_speed_mps": candidate.get("max_speed"),
+             "planning_speed_mps": candidate.get("planning_speed"),
+             "speed_source": candidate.get("speed_source"),
              "requested_transit_speed_mps": item.get("requested_transit_speed_mps"),
              "requested_work_speed_mps": item.get("requested_work_speed_mps")}
     cruise = candidate.get("cruise_speed")
@@ -176,12 +192,13 @@ def _nearest_entry(candidate, item):
     return entry
 
 
-def _zero_retained_diagnosis(nearest, fastest):
+def _zero_retained_diagnosis(nearest):
     """Explain the single most promising excluded candidate in actionable terms."""
     if not nearest:
         return {"binding_constraint": "NO_CANDIDATE",
                 "actionable": "没有可用于比对的候选机。"}
     top = nearest[0]
+    planning_speed = top.get("planning_speed_mps") or top.get("requested_transit_speed_mps")
     if not top.get("radius_ok", True):
         binding = "FLIGHT_RADIUS"
         also_range = ("，且往返航程下界超过预算" if not top["range_ok"] else "")
@@ -191,15 +208,14 @@ def _zero_retained_diagnosis(nearest, fastest):
                       f"需要更近的起飞点或最大飞行半径更大的机型。")
     elif not top.get("speed_ok", True):
         binding = "SPEED_LIMIT"
-        actionable = (f"最近候选 {top['uav_id']} 最大速度 {top['max_speed_mps']:g} m/s 低于规划速度"
-                      f"（转场 {top['requested_transit_speed_mps']:g} / 作业 "
-                      f"{top['requested_work_speed_mps']:g} m/s）；可降低速度，或改用支持该速度的机型。")
+        actionable = (f"最近候选 {top['uav_id']} 最大速度 {top['max_speed_mps']:g} m/s 低于规划速度 "
+                      f"{planning_speed:g} m/s；可降低速度，或改用支持该速度的机型。")
     elif top["range_ok"] and not top["time_ok"]:
         binding = "TIME_LOWER_BOUND"
         if top.get("time_ok_at_cruise") and top.get("cruise_speed_mps"):
             actionable = (f"最近候选 {top['uav_id']} 距目标中心 {top['distance_m']:.0f} m，"
                           f"往返航程下界 {top['round_trip_lower_bound_m']:.0f} m 未超过航程预算 "
-                          f"{top['range_budget']:.0f} m；但按默认转场速度 {fastest:g} m/s 往返需 "
+                          f"{top['range_budget']:.0f} m；但按规划速度 {planning_speed:g} m/s 往返需 "
                           f"{top['time_lower_bound_s']:.0f} s，超过时间预算 {top['time_budget']:.0f} s。"
                           f"按其巡航速度 {top['cruise_speed_mps']:g} m/s 约需 "
                           f"{top['time_lower_bound_at_cruise_s']:.0f} s。可指定不超过机型 max_speed 的"
@@ -208,7 +224,7 @@ def _zero_retained_diagnosis(nearest, fastest):
         else:
             actionable = (f"最近候选 {top['uav_id']} 距目标中心 {top['distance_m']:.0f} m，"
                           f"往返航程下界 {top['round_trip_lower_bound_m']:.0f} m 未超过航程预算 "
-                          f"{top['range_budget']:.0f} m；但按默认转场速度 {fastest:g} m/s 往返需 "
+                          f"{top['range_budget']:.0f} m；但按规划速度 {planning_speed:g} m/s 往返需 "
                           f"{top['time_lower_bound_s']:.0f} s，超过时间预算 {top['time_budget']:.0f} s。"
                           f"可指定不超过机型 max_speed 的速度后重算（指定全局速度时需把候选范围缩小到"
                           f"支持该速度的机型），不能笼统判为航程不足。")
@@ -228,17 +244,17 @@ def _zero_retained_diagnosis(nearest, fastest):
 
 def _actual_reach_diagnosis(prepared, job_ids):
     """Explain why no retained candidate can reach any job on actual transit."""
-    speeds = prepared["speeds"]
     rows = []
     for candidate in prepared["candidates"]:
         uid = candidate["uav_id"]
         origin = candidate["origin"]
         limit = candidate.get("max_flight_radius")
+        planning_speed = candidate["planning_speed"]
         for job_id, job in zip(job_ids, prepared["jobs"]):
             distance = direct_route((origin["longitude"], origin["latitude"]),
                                     job["center"], prepared["flight_alt"], points=0)["one_way_distance"]
             round_range = 2 * distance
-            round_time = round_range / speeds["transit"]
+            round_time = round_range / planning_speed
             farthest = distance + job_radius(job)
             radius_ok = limit is None or farthest <= limit + 1e-6
             rows.append((round_range, round_time, uid, job_id, candidate,
@@ -277,7 +293,6 @@ def _speed_alternatives(prepared, routes, work_range, plausible, skip_ids):
     The result is evidence for a conditional suggestion, not a silent change.
     """
     rows = []
-    transit_speed = prepared["speeds"]["transit"]
     requested = prepared.get("requested_speed")
     for candidate in plausible:
         uid = candidate["uav_id"]
@@ -285,6 +300,7 @@ def _speed_alternatives(prepared, routes, work_range, plausible, skip_ids):
             continue
         origin = candidate["origin"]
         home = (origin["longitude"], origin["latitude"])
+        planning_speed = candidate["planning_speed"]
         max_speed = candidate["max_speed"]
         radius_limit = candidate.get("max_flight_radius")
         best = None
@@ -305,9 +321,8 @@ def _speed_alternatives(prepared, routes, work_range, plausible, skip_ids):
             required = (total / candidate["time_budget"]
                         if candidate["time_budget"] > 0 else math.inf)
             speed_ok = required <= max_speed + 1e-9
-            default_speed_ok = (transit_speed <= max_speed + 1e-9
-                                and job["work_speed"] <= max_speed + 1e-9)
-            default_time = transit / transit_speed + work_range[index] / job["work_speed"]
+            default_speed_ok = planning_speed <= max_speed + 1e-9
+            default_time = total / planning_speed
             default_time_ok = default_time <= candidate["time_budget"] + 1e-6
             if range_ok and radius_ok and default_time_ok and default_speed_ok:
                 continue
@@ -325,7 +340,7 @@ def _speed_alternatives(prepared, routes, work_range, plausible, skip_ids):
             elif not radius_ok:
                 default_binding = "FLIGHT_RADIUS"
             elif not default_speed_ok:
-                default_binding = "REQUESTED_SPEED" if requested is not None else "DEFAULT_SPEED"
+                default_binding = "REQUESTED_SPEED" if requested is not None else "CRUISE_SPEED"
             elif not default_time_ok:
                 default_binding = "DEFAULT_TIME"
             else:
@@ -339,8 +354,10 @@ def _speed_alternatives(prepared, routes, work_range, plausible, skip_ids):
                    "total_range_m": round(total, 3),
                    "range_budget": candidate["range_budget"],
                    "time_budget": candidate["time_budget"],
-                   "default_transit_speed_mps": transit_speed,
-                   "default_work_speed_mps": job["work_speed"],
+                   "planning_speed_mps": planning_speed,
+                   "speed_source": candidate.get("speed_source"),
+                   "default_transit_speed_mps": planning_speed,
+                   "default_work_speed_mps": planning_speed,
                    "default_time_s": round(default_time, 3),
                    "default_binding": default_binding,
                    "required_speed_mps": round(required, 3),
@@ -373,7 +390,7 @@ def _screen_candidates(prepared, routes, work_range):
 
     A circumscribed disk encloses every possible rectangle partition. Omitting
     work cost keeps this a necessary bound even when a job is shared. Use the
-    fastest planned horizontal speed for a conservative time lower bound.
+    each candidate's planned speed for the time lower bound.
 
     The returned screening block distinguishes the range bound from the time
     bound, keeps a compact closest-candidate diagnosis, and returns only a
@@ -383,11 +400,13 @@ def _screen_candidates(prepared, routes, work_range):
     """
     retained, excluded, fixed_infeasible = [], [], []
     plausible = []
-    speeds = prepared["speeds"]
-    fastest = max(speeds.values())
+    planning_speeds = [candidate["planning_speed"] for candidate in prepared["candidates"]]
+    min_planning = min(planning_speeds)
+    max_planning = max(planning_speeds)
     for candidate in prepared["candidates"]:
         origin = candidate["origin"]
-        transit_ok = speeds["transit"] <= candidate["max_speed"] + 1e-9
+        planning_speed = candidate["planning_speed"]
+        speed_ok = planning_speed <= candidate["max_speed"] + 1e-9
         radius_limit = candidate.get("max_flight_radius")
         bounds = []
         for job in prepared["jobs"]:
@@ -398,15 +417,14 @@ def _screen_candidates(prepared, routes, work_range):
             radius_ok = radius_limit is None or farthest <= radius_limit + 1e-6
             # direct_route rounds to millimetres; bias downward to preserve a lower bound.
             lower = 2 * max(0.0, distance - radius - 0.001)
-            speed_ok = transit_ok and job["work_speed"] <= candidate["max_speed"] + 1e-9
             bound = {"job_id": job["job_id"], "distance_m": distance,
                      "farthest_m": farthest, "max_flight_radius_m": radius_limit,
                      "radius_ok": radius_ok,
                      "round_trip_lower_bound_m": lower,
-                     "time_lower_bound_s": lower / fastest,
+                     "time_lower_bound_s": lower / planning_speed,
                      "range_ok": lower <= candidate["range_budget"] + 1e-6,
-                     "time_ok": lower / fastest <= candidate["time_budget"] + 1e-6,
-                     "speed_ok": speed_ok, "work_speed_mps": job["work_speed"]}
+                     "time_ok": lower / planning_speed <= candidate["time_budget"] + 1e-6,
+                     "speed_ok": speed_ok, "work_speed_mps": planning_speed}
             bounds.append(bound)
             if job.get("fixed_uav") == candidate["uav_id"] and not (
                     speed_ok and bound["range_ok"] and bound["time_ok"] and radius_ok):
@@ -415,8 +433,8 @@ def _screen_candidates(prepared, routes, work_range):
                                              time_budget=candidate["time_budget"],
                                              speed_ok=speed_ok,
                                              max_speed_mps=candidate["max_speed"],
-                                             requested_transit_speed_mps=speeds["transit"],
-                                             requested_work_speed_mps=job["work_speed"]))
+                                             requested_transit_speed_mps=planning_speed,
+                                             requested_work_speed_mps=planning_speed))
         # Only candidates whose optimistic lower bound already fits the range,
         # radius and a speed within max_speed can become feasible by changing speed.
         if any(b["range_ok"] and b["radius_ok"]
@@ -444,7 +462,7 @@ def _screen_candidates(prepared, routes, work_range):
                          "time_budget": candidate["time_budget"],
                          "speed_ok": best["speed_ok"],
                          "max_speed_mps": candidate["max_speed"],
-                         "requested_transit_speed_mps": speeds["transit"],
+                         "requested_transit_speed_mps": planning_speed,
                          "requested_work_speed_mps": best["work_speed_mps"],
                          "best_bound": best})
 
@@ -463,9 +481,9 @@ def _screen_candidates(prepared, routes, work_range):
     screening = {"method": "area_round_trip_lower_bound",
                  "input_count": len(prepared["candidates"]),
                  "retained_count": len(retained), "excluded_count": len(excluded),
-                 "assumed_transit_speed_mps": fastest,
-                 "transit_speed_mps": speeds["transit"],
-                 "work_speed_mps": speeds["work"],
+                 "assumed_transit_speed_mps": min_planning,
+                 "transit_speed_mps": min_planning,
+                 "work_speed_mps": max_planning,
                  "requested_speed_mps": prepared.get("requested_speed"),
                  "reasons": reasons,
                  "nearest": nearest,
@@ -478,7 +496,7 @@ def _screen_candidates(prepared, routes, work_range):
     screening["alternatives"] = _speed_alternatives(
         prepared, routes, work_range, plausible, {u["uav_id"] for u in retained})
     if not retained:
-        screening["diagnosis"] = _zero_retained_diagnosis(nearest, fastest)
+        screening["diagnosis"] = _zero_retained_diagnosis(nearest)
     retained_ids = {u["uav_id"] for u in retained}
     fixed_missing = {j["job_id"]: j["fixed_uav"] for j in prepared["jobs"]
                      if j.get("fixed_uav") and j["fixed_uav"] not in retained_ids}
@@ -611,7 +629,10 @@ def _validate_allocation(estimate, allocation):
                         for j, line in enumerate(numeric[field][uid])]
             _same(row.get(field), expected, "原始求解转场成本与当前成本记录不一致")
         _same(row.get("patrol_range_base"), [None] + numeric["work_range"], "原始求解作业航程不一致")
-        _same(row.get("patrol_time_base"), [None] + numeric["work_time"], "原始求解作业时间不一致")
+        speed = candidate.get("planning_speed")
+        expected_time = ([None] + [w / speed for w in numeric["work_range"]]
+                         if speed else [None] + numeric["work_time"])
+        _same(row.get("patrol_time_base"), expected_time, "原始求解作业时间不一致")
     constraints = require(allocation.get("constraints", {}), "constraints", dict)
     fixed = constraints.get("fixed_assignments", {})
     for jid, uid in estimate.get("constraints", {}).get("fixed_assignments", {}).items():
@@ -697,10 +718,12 @@ def build(request):
                and len(allocation["owners"][jid]) != 1 for jid in supplied_jobs):
             raise AtomicError("ALLOCATION_EVIDENCE_MISMATCH", "圆形巡逻不能分区后代替完整圆周")
         origin = candidate["origin"]
-        steps, transit_range, work_range, work_time = build_steps(prepared, ordered, origin, altitude, timeout)
+        speed = candidate["planning_speed"]
+        steps, transit_range, work_range, work_time = build_steps(
+            prepared, ordered, origin, altitude, timeout, work_speed=speed)
         distance = transit_range + work_range
         battery_after = candidate["battery"] * (1 - distance / candidate["flight_remain"])
-        duration = transit_range / prepared["speeds"]["transit"] + work_time
+        duration = transit_range / speed + work_time
         if duration > candidate["time_budget"] + 1e-6:
             raise AtomicError("BUDGET_EXCEEDED", "最终分区的估算水平作业时间超过预算",
                               uav_id=uid, estimated_time_s=duration, time_budget=candidate["time_budget"])
@@ -709,7 +732,8 @@ def build(request):
             raise AtomicError("BUDGET_EXCEEDED", "最终分区航程超过预算或剩余电量低于返航预留", uav_id=uid,
                               estimated_range_m=distance, estimated_battery_after=battery_after,
                               reserve_battery_percent=reserve)
-        assignments.append({"uav_id": uid, "origin": deepcopy(origin), "flight_alt": altitude,
+        assignments.append({"uav_id": uid, "speed": speed, "speed_source": candidate.get("speed_source"),
+                            "origin": deepcopy(origin), "flight_alt": altitude,
                             "estimated_time_s": round(duration, 3),
                             "battery_level": candidate["battery"], "flight_remain": candidate["flight_remain"],
                             "range_budget": candidate["range_budget"], "time_budget": candidate["time_budget"],
@@ -734,7 +758,7 @@ def build(request):
               "whole_mission_budget_complete": False}
     output["_summary"] = {"task_key": output["task_key"], "task_type": output["task_type"],
                           "task_types": output["task_types"], "ordered": output["ordered"],
-                          "assignments": [{k: row[k] for k in ("uav_id", "flight_alt", "jobs", "battery_level", "flight_remain",
+                          "assignments": [{k: row[k] for k in ("uav_id", "speed", "flight_alt", "jobs", "battery_level", "flight_remain",
                                                                "range_budget", "time_budget", "estimated_range_m", "estimated_battery_after")}
                                           for row in assignments], "unused": output["unused"],
                           "budget_scope": output["budget_scope"], "submitted": False}

@@ -53,11 +53,12 @@ def compute(request):
         seen.add(uid)
         task_id = f"{task_key}-{uid}"
         raw = []
+        speed = assignment.get("speed") if assignment.get("speed") is not None else plan.get("speed")
 
         def add(cmd, params):
             params = deepcopy(params)
-            if plan.get("speed") is not None and cmd in ("takeoff", "follow_path", "patrol_move", "fuel_explore"):
-                params["max_vel" if cmd == "fuel_explore" else "speed"] = plan["speed"]
+            if speed is not None and cmd in ("takeoff", "follow_path", "patrol_move", "fuel_explore"):
+                params["max_vel" if cmd == "fuel_explore" else "speed"] = speed
             raw.append({"cmd": cmd, "task_id": task_id, "step_id": len(raw) + 1, "params": params})
 
         add("arm", {})

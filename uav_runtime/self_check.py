@@ -186,6 +186,16 @@ def check_alternatives():
     if abs(selected["time_budget"] - 3300.0) > 1e-6:
         raise RuntimeError("逐机返航预留未进入时间预算")
 
+    cruise = candidate("CHECK-CRUISE", 10.0)
+    cruise["cruise_speed"] = 5.0
+    result = costs({"operation": "costs", "candidates": [cruise], "jobs": [job]})
+    if result["candidates"][0]["planning_speed"] != 5.0:
+        raise RuntimeError("未指定速度时未使用 cruise_speed")
+    overridden = costs({"operation": "costs", "candidates": [cruise], "jobs": [job],
+                        "speed": 3.0})
+    if overridden["candidates"][0]["planning_speed"] != 3.0:
+        raise RuntimeError("用户指定速度未覆盖 cruise_speed")
+
     # The figure's example: 500x300, lane 75 m, 4 lanes, coverage 2,225 m.
     fov = math.degrees(2 * math.atan(75 / (2 * 50)))
     if abs(search_lane_m(50, fov) - 75) > 1e-6:

@@ -79,7 +79,6 @@ def cost_geometry(prepared, routes=None, work_range=None):
             else:
                 base = route["path_length"]
             work_range.append(base * job["laps"])
-    speeds = prepared["speeds"]
     job_ids = [job["job_id"] for job in prepared["jobs"]]
     costs = {"work_range": work_range,
              "work_time": [d / job["work_speed"] for d, job in zip(work_range, prepared["jobs"])],
@@ -99,7 +98,7 @@ def cost_geometry(prepared, routes=None, work_range=None):
                     leg = direct_route(end_of_previous_job, start_of_next_job, altitude, points=0)
                     row.append(leg["one_way_distance"])
             distances.append(row)
-        times = [[d / speeds["transit"] for d in row] for row in distances]
+        times = [[d / candidate["planning_speed"] for d in row] for row in distances]
         # Per-job physical reachability: the aircraft must be able to fly from
         # its takeoff point to this job and back within its range and time
         # budgets. Job work is intentionally excluded here because a shareable
@@ -152,7 +151,7 @@ def search_box(zone, altitude):
     return [west, min(lat for _, lat in samples), 0.3], [east_lon, max(lat for _, lat in samples), round(altitude + 0.5, 3)]
 
 
-def build_steps(prepared, ordered, origin, altitude, timeout):
+def build_steps(prepared, ordered, origin, altitude, timeout, work_speed=None):
     """Connect the actual first/last waypoints of consecutive jobs and the home point."""
     home = previous = lon_lat(origin)
     steps = []
@@ -172,7 +171,7 @@ def build_steps(prepared, ordered, origin, altitude, timeout):
             base = route["path_length"]
         lap_length = base * zone["laps"]
         work_range += lap_length
-        work_time += lap_length / zone["work_speed"]
+        work_time += lap_length / (work_speed or zone["work_speed"])
         operation = {"type": task_type, "job_id": job_id,
                      "name": zone.get("name", job_id), "zone": zone["label"]}
         if task_type == "patrol":

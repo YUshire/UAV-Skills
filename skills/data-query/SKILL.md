@@ -31,12 +31,17 @@ uav_runtime/.venv/bin/python uav_runtime/run.py skills/data-query/scripts/query_
 |---|---|
 | `uav_id`、`alias` | 编号、别名 |
 | `uav_model`、`uav_series` | 型号、系列 |
-| `max_endurance`、`hover_endurance` | 最大续航、悬停续航，单位 min |
-| `max_range`、`max_flight_radius` | 最大航程、最大飞行半径，单位 m |
-| `cruise_speed`、`max_speed`、`max_up_speed`、`max_down_speed` | 速度，单位 m/s |
-| `max_altitude` | 最大飞行高度，单位 m |
-| `max_wind_speed`、`emi_resistance_level` | 抗风、抗电磁干扰等级 |
-| `takeoff_mode`、`hover_accuracy`、`max_angular_velocity` | 起飞模式、悬停精度、最大角速度 |
+| `max_endurance`、`hover_endurance` | 最大续航、悬停续航，单位 min；时间预算只用 `max_endurance`，悬停未进预算 |
+| `max_range` | 空载航程，m；只用于附近预筛，不是单机预算 |
+| `max_flight_radius` | 最大飞行半径/控制半径，m；runtime 检查最远作业点 |
+| `cruise_speed` | 巡航速度，m/s；未指定 `speed` 时的规划默认速度 |
+| `max_speed` | 最大速度，m/s；只做上限，不作为规划速度 |
+| `max_up_speed`、`max_down_speed` | 垂直速度，m/s；当前未进预算 |
+| `max_altitude` | 最大飞行高度，m；航高预筛和多机错高上限 |
+| `return_reserve` | 返航预留，%；预算取 `max(20, return_reserve)` |
+| `max_wind_speed`、`emi_resistance_level` | 抗风、抗电磁干扰；当前只查询，不判可行 |
+| `takeoff_mode`、`hover_accuracy`、`max_angular_velocity` | 起飞模式、悬停精度、最大角速度；当前只查询 |
+| `max_operating_temp`、`min_operating_temp`、`min_takeoff_landing_distance` | 温度限制、最小起降距离；当前只查询/未用，不判可行 |
 
 **uav_status**（状态记录）
 
@@ -46,13 +51,18 @@ uav_runtime/.venv/bin/python uav_runtime/run.py skills/data-query/scripts/query_
 |---|---|
 | `uav_id` | 编号 |
 | `mission_status` | 空闲 / 执行中 / 离线 / 状态未知（由同步服务实时更新） |
-| `longitude`、`latitude`、`altitude` | 记录的起飞点位置，不随飞行更新 |
+| `longitude`、`latitude`、`altitude` | 登记的起飞点经纬度和场地海拔；规划用经纬度，`altitude` 当前不读 |
 | `battery_level` | 电量记录，% |
-| `health_score` | 健康度 |
-| `payload_status` | 载荷：高清相机 / 红外相机 / 高清+红外 / 激光雷达 |
-| `flight_remain` | 剩余可飞行距离，m |
-| `max_range_full`、`max_range_empty`、`load_range` | 满载航程、空载航程、载荷航程，m |
-| `fov`、`camera_recognition_range`、`infrared_detection_range`、`lidar_detection_range` | 视场角、各类探测距离 |
+| `health_score` | 健康度；预筛 >60，已包含在 `flight_remain` 里 |
+| `payload_status` | 载荷：高清相机 / 红外相机 / 高清+红外 / 激光雷达；只做名称匹配 |
+| `flight_remain` | 当前剩余可飞距离，m；已含健康度/电量/当前载荷，预算只扣返航预留 |
+| `uav_weight`、`empty_weight`、`full_weight`、`load_coff` | 造库时推 `flight_remain`；runtime 不直接读 |
+| `max_range_full`、`max_range_empty` | 满载/空载航程，m；造库时用于推 `flight_remain` |
+| `load_range` | 机载载荷的最小**探测距离**，m；**不是航程**，不要用于距离预算 |
+| `fov` | 视场角，deg；搜索航带 `lane=2×flight_alt×tan(fov/2)` |
+| `camera_recognition_range`、`infrared_detection_range`、`lidar_detection_range` | 各类探测距离；只证明登记能力，不证明具体识别 |
+
+**计算字段口径**：runtime 预算只读取 `flight_remain`、`battery_level`、`max_endurance`、`return_reserve`、`max_speed`、`max_altitude`、`max_flight_radius`、`fov` 和起飞点经纬度；预筛另读 `mission_status`、`health_score`、`payload_status`；`max_range` 只做附近预筛；`load_range` 是探测距离不是航程；`max_range_full/empty`、重量、`load_coff` 只在造库推 `flight_remain` 时使用；`flight_remain` 已含健康度/电量/当前载荷，预算只在其上扣返航预留，不再重复乘。`cruise_speed` 是未指定 `speed` 时的规划默认速度，`max_speed` 只做上限。
 
 **geo_library**（地点）
 
