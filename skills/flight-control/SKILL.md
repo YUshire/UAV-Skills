@@ -30,7 +30,13 @@ uav_runtime/.venv/bin/python uav_runtime/run.py skills/flight-control/scripts/as
   --input '{"plan":{"ref":"<build实际返回的artifact_file>","select":"/data"}}'
 ```
 
-返回 `artifact_file` 和每架机的报告摘要。原始 WGS84 序列在 `/data/participants/<索引>/raw_batch`；已转换的本地序列在同一项的 `dry_run.batch`。电量、航程取 `summary.participants`。`UAV_SHOW_ACTIONS` 开关默认 `compact`：`summary.participants[*].actions` 给出动作序列，最终回复用 JSON 代码块展示，长航点数组折叠为 `count/first/last`；设为 `full` 时 `actions` 带完整 `raw_batch` 并附 `local_batch`（大计划可能被截断）；设为 `0` 关闭，只报摘要。普通回复其余部分按 mission-planning 第五节说明任务安排和实际状态，需要文件时提供“完整方案”链接。此脚本只做离线校验，`submitted=false`。以下是它采用的映射规则。
+返回 `artifact_file` 和每架机的报告摘要。原始 WGS84 序列在 `/data/participants/<索引>/raw_batch`；已转换的本地序列在同一项的 `dry_run.batch`。电量、航程取 `summary.participants`。`UAV_SHOW_ACTIONS` 开关默认 `compact`：`summary.participants[*].actions` 给出动作序列，最终回复用 JSON 代码块展示，长航点数组折叠为 `count/first/last`；设为 `full` 时 `actions` 带完整 `raw_batch` 并附 `local_batch`（大计划可能被截断）；设为 `0` 关闭，只报摘要。普通回复其余部分按 mission-planning 第五节说明任务安排和实际状态，需要文件时提供“完整方案”链接。此脚本只做离线校验，`submitted=false`。
+
+本次交付方案来自多次组装时，汇集对应返回中的全部参与机，逐机展示实际返回的 `actions`；待接受的替代方案同样展示，并标明它改变的约束。未下发、原请求不可行或已经给出摘要表格，都不代替这些 JSON。只汇集本次交付采用的方案，不混入已放弃的版本。每机字段独立写明，不用“同上”或省略号代替；保留工具已有的航点折叠结构。紧凑动作仅供展示，实际注册仍使用产物中的 `raw_batch`。
+
+普通任务离线交付时，另用 `write_file` 将本次 `task_key`、动作产物实际返回的 `artifact_file`、参与机、`targets` 和拟采用的 `policies` 保存到唯一的请求 JSON；无目标时 `targets=[]`，策略沿用下文 authorize 契约。跟踪须保留 `on_first_confirmed="APPROACH_AND_TRACK"` 和实际目标 ID 的 `tracking_target_ids`；线上 profile 引用尚未取得时列为待补，不伪造 ID 或 revision。此文件仅保存意图，不是已授权或已提交的 spec，不能直接用于下发；接通后仍按中央流程获取真实引用并校验。
+
+以下是组装采用的映射规则。
 
 对任务航迹 `planning_routes.py` 的 `build` 结果中的每个 `assignments[i]`（完整数据在返回文件的 `data` 中）：
 
@@ -41,17 +47,19 @@ uav_runtime/.venv/bin/python uav_runtime/run.py skills/flight-control/scripts/as
    - `patrol` → `patrol_move`，`waypoints` 原样复制，重复 `laps` 次（每圈一条动作）。
 3. 航点和搜索框逐字复制，不取整、不删点、不调整顺序。
 
+`fuel_explore` 的 `box_min[2]`/`box_max[2]` 是搜索空间上下界，当前组装接口没有独立的定高参数；例如 80 米方案的 `[0.3,80.5]` 不证明探索全程保持 80 米。用户明确要求定高时，保留已算的几何方案并说明搜索阶段定高尚未验证，不把格式校验成功说成定高要求已满足，也不靠手改搜索框实现定高。
+
 用户要求无目标探索/巡逻完成后原地悬停时，仍保留 `build` 给出的返航转场和 `land`，作为中央登记需要的备用收尾段；另在方案中明确 `policies.on_search_complete="HOLD"`。中央把作业段和返航段分开，由策略或后续返航指令决定是否执行收尾，不是把整个 batch 直接连续发布。离线只验证格式与转换，不能称已经验证悬停执行或无限等待续航；不能删除返航段来“实现HOLD”。
 
-一架机一个搜索作业的序列长这样（航点已省略）：
+一架机一个搜索作业的紧凑展示示例（实际回复采用本次工具返回值）：
 
 ```json
 [
   {"cmd":"arm","task_id":"T1021153012a3f2-UAV-003","step_id":1,"params":{}},
   {"cmd":"takeoff","task_id":"T1021153012a3f2-UAV-003","step_id":2,"params":{"altitude":1.2}},
-  {"cmd":"follow_path","task_id":"T1021153012a3f2-UAV-003","step_id":3,"params":{"waypoints":[…],"skip_unreachable":false}},
+  {"cmd":"follow_path","task_id":"T1021153012a3f2-UAV-003","step_id":3,"params":{"waypoints":{"count":2,"first":{"longitude":118.7273,"latitude":31.1747,"altitude":1.2},"last":{"longitude":118.727366,"latitude":31.174749,"altitude":1.2}},"skip_unreachable":false}},
   {"cmd":"fuel_explore","task_id":"T1021153012a3f2-UAV-003","step_id":4,"params":{"box_min":[118.727366,31.174749,0.3],"box_max":[118.727492,31.174848,1.7],"timeout_sec":1200.0}},
-  {"cmd":"follow_path","task_id":"T1021153012a3f2-UAV-003","step_id":5,"params":{"waypoints":[…],"skip_unreachable":false}},
+  {"cmd":"follow_path","task_id":"T1021153012a3f2-UAV-003","step_id":5,"params":{"waypoints":{"count":2,"first":{"longitude":118.727366,"latitude":31.174749,"altitude":1.2},"last":{"longitude":118.7273,"latitude":31.1747,"altitude":1.2}},"skip_unreachable":false}},
   {"cmd":"land","task_id":"T1021153012a3f2-UAV-003","step_id":6,"params":{}}
 ]
 ```
@@ -64,6 +72,8 @@ uav_runtime/.venv/bin/python uav_runtime/run.py skills/flight-control/scripts/su
 ```
 
 `--origin-lat/--origin-lon` 取该机航迹结果里的 `origin`（起飞点），不能用任务中心或某个航点代替。
+
+当前组装采用转换器默认的 10000 米范围上限，用于限制本地 ENU 近似的适用范围，不是飞机航程。候选准备在已知中心时预查同一限制；区域边缘、全部航点及未给中心的任务仍以本次动作校验为准。超限时保留已生成几何结果并报告工具限制，不换原点或调大上限绕过检查。
 
 | 结果 | 处理 |
 |---|---|

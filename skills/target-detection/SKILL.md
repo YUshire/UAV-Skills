@@ -29,6 +29,14 @@ description: 管理每架无人机的目标感知：把用户要找的目标整�
 - 探索、建图任务没有目标，不启动感知。
 - “查看、看看、扫一遍”按 mission-planning 解析；上下文有搜索对象就沿用，否则按无目标区域查看处理。已给出的可识别类别或外观足以表达目标时直接整理清单，不追问额外特征。
 
+## 扫描对象与检测目标
+
+- “扫描战壕”“沿路扫描”中的战壕、道路是**扫描对象**，放在任务图 `scan` 步骤（`params.targets`/`description`）或扫描要求里，不放进 COCO `targets`。
+- `targets` 只放检测/跟踪对象，例如“移动人员”；`category` 仍用 COCO 类名。
+- 设计好的扫描/识别/跟踪接口默认保留并按可用规划，后续补充实现；不因 `backend_verified=false` 或能力未验证拒绝任务。
+- `validate_targets` 只校验格式和该机状态/资源库记录，`backend_verified=false`；它不证明类别受后端支持，也不证明识别能力。不要用试填类别推断能力。
+- 目标清单不替代扫描要求；扫描对象不要用 target 条目表示。
+
 ## 命令
 
 下列在线命令需要已部署的外部运行项目、ROS 环境和中央服务；先按 AGENTS.md 检查环境。本工作区自带的离线目标校验见下节。
@@ -56,6 +64,8 @@ uav_runtime/.venv/bin/python uav_runtime/run.py skills/target-detection/scripts/
 ```
 
 返回 `validated=true`、`submitted=false`、`perception_started=false`、`backend_verified=false`，校验范围为目标格式和该机的状态/资源库记录。在线部署后仍须检查真实感知后端；该结果不代表感知已启动或目标已找到。
+
+离线交付带目标的方案时，用日常语言说明“目标配置已检查，实际识别能力尚未验证”，不只写“已检查通过”。要求发现后跟踪时，按 flight-control 的离线交付规则保存目标与拟用策略，并说明跟踪尚待服务接通验证；不把目标格式校验当作跟踪能力验证。策略字段留在方案文件中，普通回复无需罗列内部字段。
 
 ## 下发前的感知准备
 

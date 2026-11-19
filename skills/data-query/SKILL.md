@@ -84,7 +84,9 @@ uav_runtime/.venv/bin/python uav_runtime/run.py skills/data-query/scripts/query_
 uav_runtime/.venv/bin/python uav_runtime/run.py skills/data-query/scripts/prepare_candidates.py --input '{"uav_ids":["UAV-001","UAV-003"],"flight_alt":1.2}'
 ```
 
-省略 `uav_ids` 表示查询全部合格机；候选数不表示实际出动数。保留原预筛条件：三处记录齐全、空闲、电量大于30%、健康度大于60、剩余航程有效、载荷符合明确要求、机型升限满足输入航高。点名候选未全部合格返回 `CANDIDATE_EXCLUDED`，错误中带 `available_candidates`、`available_count`（当前筛选条件下可用的替代机摘要）和 `max_recorded_altitude`（记录中的最高升限）；需要全量替代机时去掉 `uav_ids`、带上作业中心重查，不能只报点名机不可达。无合格机返回 `NO_CANDIDATE`，同样带排除原因和记录中的最高升限。
+省略 `uav_ids` 表示查询全部合格机；候选数不表示实际出动数。保留原预筛条件：三处记录齐全、空闲、电量大于30%、健康度大于60、剩余航程有效、载荷符合明确要求、机型升限满足输入航高。点名候选未全部通过资源/状态预筛时返回 `CANDIDATE_EXCLUDED`，错误中带 `available_candidates`、`available_count`（当前筛选条件下可用的替代机摘要）和 `max_recorded_altitude`（记录中的最高升限）；需要全量替代机时去掉 `uav_ids`、带上作业中心重查，不能只报点名机不可达。无合格机返回 `NO_CANDIDATE`，同样带排除原因和记录中的最高升限。
+
+给出作业中心时还会复用动作转换器检查该点是否在当前转换范围内，默认上限为距登记起飞点 10000 米；以 `summary.coordinate_filter.max_distance_m` 为准。超限原因在 `excluded[*].constraint="COORDINATE_RANGE"`，全部超限返回 `COORDINATE_RANGE_EXCEEDED`；点名机超限返回 `CANDIDATE_EXCLUDED`，不静默删掉点名机。此限制来自工具，不代表物理航程不足；若剩余候选又因预算失败，回复须合并两类排除证据，不能推断全机队物理无解。这里只检查已给中心，不认证整个区域或多作业组合均在范围内，最终仍由动作组装检查全部坐标；未给中心时不作这项预筛。
 
 需要全机队或全量候选时用本入口（省略 `uav_ids`）；不要用 `SELECT ... LIMIT N` 代替全量。`truncated=false` 只表示本次 SQL 未被服务端截断，不代表查到了全表；用 SQL 统计时先 `COUNT(*)`，需要明细再分页。
 
@@ -92,7 +94,7 @@ uav_runtime/.venv/bin/python uav_runtime/run.py skills/data-query/scripts/prepar
 
 `payload` 数组各项必须同时满足，每项按状态记录字符串包含匹配，不表示多个名称任选其一。用户只要求红外能力时可用 `["红外"]` 匹配“红外相机”或“高清+红外”；不能把两种替代名称同时放入数组，变成额外的双重要求。具体载荷不明时先查询原记录，不靠探测距离推断。
 
-完整结果在 artifact：`candidates` 包含机号、起飞原点、原始电量/航程/升限记录及 `range_budget`（米）、`time_budget`（秒）、`reserve_battery_percent`；`excluded` 列排除原因。返回的 summary 只给 `candidate_count`、`excluded_count`、`bbox_input_count`、`circle_excluded_count` 和 `spatial_filter`，不回传全量明细。预算至少保留20%电量；资源记录 `return_reserve` 更高时按更高值预留，由工具计算，不把 `flight_remain` 或分钟制 `max_endurance` 直接改名作预算。本入口不查询任务地点、不计算路径、不决定归属。
+完整结果在 artifact：`candidates` 包含机号、起飞原点、原始电量/航程/升限记录及 `range_budget`（米）、`time_budget`（秒）、`reserve_battery_percent`；`excluded` 列排除原因。返回的 summary 给出候选/排除数量、附近预筛 `spatial_filter` 和中心转换预筛 `coordinate_filter`，不回传全量明细。预算至少保留20%电量；资源记录 `return_reserve` 更高时按更高值预留，由工具计算，不把 `flight_remain` 或分钟制 `max_endurance` 直接改名作预算。本入口不查询任务地点、不计算路径、不决定归属。
 
 ## SQL 返回与异常
 

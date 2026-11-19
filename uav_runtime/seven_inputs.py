@@ -1,9 +1,11 @@
 """Prepare existing fleet records and explicit geographic jobs for seven skills."""
 from copy import deepcopy
+import importlib.util
 import math
 
 from .atomic.common import AtomicError, require, required
 from .direct_path import EARTH_RADIUS_M, direct_route
+from .paths import ROOT
 
 
 def number(value, field, positive=False):
@@ -134,6 +136,42 @@ def prepare_candidates(data):
     candidates = deepcopy(selected['candidates'])
     for row in candidates:
         row['battery'] = row['battery_level']
+    coordinate_filter = None
+    if center is not None:
+        # Reuse the final action converter; its projection and limit are the source of truth.
+        spec = importlib.util.spec_from_file_location(
+            '_candidate_coordinate_validator', ROOT / 'skills/flight-control/scripts/submit_queue_batch.py')
+        validator = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(validator)
+        in_range, coordinate_excluded = [], []
+        for row in candidates:
+            origin = row['origin']
+            try:
+                local_origin = validator.validate_origin(origin['latitude'], origin['longitude'])
+            except validator.ValidationError as exc:
+                raise AtomicError('INVALID_ARGUMENT', str(exc), uav_id=row['uav_id']) from exc
+            try:
+                validator.wgs84_to_local(*center, altitude, local_origin,
+                                         validator.DEFAULT_MAX_DISTANCE_M, 'job_center')
+            except validator.ValidationError as exc:
+                coordinate_excluded.append({
+                    'uav_id': row['uav_id'], 'reasons': ['目标中心超出坐标转换范围'],
+                    'constraint': 'COORDINATE_RANGE', 'message': str(exc),
+                    'origin': deepcopy(origin), 'target_center': center,
+                    'range_budget': row['range_budget'], 'time_budget': row['time_budget']})
+            else:
+                in_range.append(row)
+        # shortcut: only the supplied centre is known here; final assembly still checks all points.
+        coordinate_filter = {'scope': 'known_job_center_only',
+                             'max_distance_m': validator.DEFAULT_MAX_DISTANCE_M,
+                             'excluded_count': len(coordinate_excluded)}
+        excluded.extend(coordinate_excluded)
+        if coordinate_excluded and (data.get('uav_ids') or not in_range):
+            raise AtomicError('CANDIDATE_EXCLUDED' if data.get('uav_ids') else 'COORDINATE_RANGE_EXCEEDED',
+                              '候选机的目标中心超出当前坐标转换范围；这是工具限制，不代表物理航程不足',
+                              coordinate_filter=coordinate_filter, excluded=excluded,
+                              available_candidates=in_range, available_count=len(in_range))
+        candidates = in_range
     return {'candidates': candidates, 'excluded': excluded, 'flight_alt': altitude,
             'reserve_battery_percent': selected['reserve_battery_percent'],
             'source': 'configured_readonly_snapshot', 'submitted': False,
@@ -141,6 +179,7 @@ def prepare_candidates(data):
                          'excluded_count': len(excluded),
                          'bbox_input_count': bbox_input_count if spatial_filter else None,
                          'circle_excluded_count': circle_excluded,
+                         'coordinate_filter': coordinate_filter,
                          'flight_alt': altitude,
                          'spatial_filter': spatial_filter}}
 

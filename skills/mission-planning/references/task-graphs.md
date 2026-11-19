@@ -50,6 +50,35 @@
 `"observed_events":{"S1":"found"}, "runtime_bindings":{"S1":{"target_position":{"longitude":121.4421,"latitude":25.2395}}}`。
 此时可补算从登记起飞点出发的完整分支预览；在线触发后的增量执行仍须用最新真实位置与状态重新规划，不能把此快照预览当成实时航迹。
 
+## 示例：扫描对象 + 检测目标 + 跟踪
+
+用户要求“扫描战壕，发现移动人员后跟踪”时，不要把“战壕”塞进 COCO 目标清单；扫描对象放在扫描步骤，检测/跟踪对象放 `targets`：
+
+```json
+{
+  "flight_alt": 100,
+  "payload": ["激光雷达"],
+  "nodes": [
+    {"id":"S1","action":"search","job":{"center_lon":120.4485,"center_lat":23.485625,
+     "shape":"rectangle","length":100,"width":80,"search_timeout":1200},
+     "params":{"targets":["moving_person"],"description":"激光雷达扫描战壕"}},
+    {"id":"SC1","action":"scan","params":{"targets":["战壕"],"description":"激光雷达扫描战壕"}},
+    {"id":"T1","action":"track","params":{"target":"moving_person"}}
+  ],
+  "edges": [
+    {"from":"S1","to":"SC1"},
+    {"from":"S1","to":"T1","on":"found"}
+  ]
+}
+```
+
+`scan` 是接口步骤，沿用前置 `S1` 的区域和执行机，不重复计算几何；扫描对象放 `SC1.params.targets`/`description`，检测/跟踪对象放 `S1.params.targets` 和 `T1.params.target`。若后端尚未实现 scan/track，保留节点并标记 pending/待验证，不删除扫描或跟踪要求；离线只交付几何前段。
+
+这个示例只表达“区域几何 + 扫描接口 + 跟踪接口”的编排，**不证明扫描过程中同时检测或立即中断跟踪**；`S1→SC1` 是前置/接口关系。用户要求“扫描中检测/立即跟踪”时，把该同时性作为未验证接口条件保留，不能声称本示例已经满足。
+
+- 明确的 completed 依赖无论是否同一架机都保留；只有没有依赖的步骤可并行。“先…再…”同机用 completed；用户明确写跨机“完成后”也用跨机 completed。因航程/半径/载荷必须换机或改并行时，回复必须写“顺序改变”并取得接受，不能一边改并行一边说原顺序已保留。
+- 用户要求严格统一航高 X 米时，当前多机错高会生成 X.3 米且没有关闭错高的工具开关；不要手工改生成高度，也不要声称已满足。说明冲突并询问是否接受 0.3 米错高或改单机/分任务，严格 X 作为未满足项保留。
+
 ## 计算范围与回复
 
 1. 每条可达分支单独调用原prepare→resolve→costs→allocate→build→assemble，互斥分支不同时执行、不叠加预算。
