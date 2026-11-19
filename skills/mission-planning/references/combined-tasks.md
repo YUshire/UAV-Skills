@@ -61,7 +61,7 @@ uav_runtime/.venv/bin/python uav_runtime/run.py skills/mission-planning/scripts/
 - 各步不同圈数、搜索时限；
 - 同一架机内的步骤顺序（`ordered=true`，`build` 按 `jobs[]` 排序）。
 
-仍不支持：固定到不同无人机的步骤之间的先后依赖（检查器返回 `CROSS_UAV_ORDER`）。这种任务不能靠拆成两个独立任务后声称原顺序已满足。
+旧扁平入口仍不支持：固定到不同无人机的步骤之间的先后依赖（检查器返回 `CROSS_UAV_ORDER`）。这种任务不能靠拆成两个独立任务后声称原顺序已满足。
 
 ## 下游按步骤处理
 
@@ -72,3 +72,5 @@ uav_runtime/.venv/bin/python uav_runtime/run.py skills/mission-planning/scripts/
 5. `assemble_plan.py` 逐航段组装动作，`search` 用 `fuel_explore`，`patrol` 按该步 `laps` 展开 `patrol_move`。
 
 两段分别通过成本、分配或 dry-run，不等于组合任务通过。最后仍要检查整任务的预算、航高、可达性、顺序和动作衔接。
+
+跨机依赖、并行、条件分支与预留能力步骤使用新增 [任务图规划入口](task-graphs.md)。原 check_task 和原普通任务输出保持兼容；任务图的几何前段校验不代表整个条件任务可以直接下发。

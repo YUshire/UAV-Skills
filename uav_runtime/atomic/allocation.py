@@ -187,12 +187,18 @@ def compute(data):
             raise AtomicError("INVALID_ARGUMENT", f"reachable.{uid} 包含未知或重复作业")
         for jid in reachable:
             eligible[jid].append(index)
+        speed = candidate.get("planning_speed")
+        if speed is not None:
+            speed = finite(speed, f"{uid}.planning_speed", True)
+            base_time = [None] + [w / speed for w in work_range[1:]]
+        else:
+            base_time = list(work_time)
         rows.append({"id": index,
                      "max_range": finite(required(candidate, "range_budget"), f"{uid}.range_budget", True),
                      "max_endurance": finite(required(candidate, "time_budget"), f"{uid}.time_budget", True),
                      "transfer_range": _matrix(distances[uid], jids, reachable, f"transfer_range.{uid}"),
                      "transfer_time": _matrix(times[uid], jids, reachable, f"transfer_time.{uid}"),
-                     "patrol_range_base": list(work_range), "patrol_time_base": list(work_time)})
+                     "patrol_range_base": list(work_range), "patrol_time_base": base_time})
     constraints = require(data.get("constraints", {}), "constraints", dict)
     if set(constraints) - {"fixed_assignments", "required_drones", "single_owner_jobs", "allowed_assignments"}:
         raise AtomicError("INVALID_ARGUMENT", "constraints 含不支持的字段")

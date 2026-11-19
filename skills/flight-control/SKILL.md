@@ -18,8 +18,7 @@ description: 把已生成的任务航迹组装成每架无人机的原始 WGS84 
 | `patrol_move` | `waypoints`、`"skip_unreachable": false` | `speed` |
 | `land` | `{}` | — |
 
-- 其他参数由校验脚本按默认值补齐（速度 1.2 m/s，FUEL 速度 0.6 m/s），不要写进序列。
-- 用户指定速度时，要同时写 `takeoff`、`follow_path`、`patrol_move` 的 `speed` 和 `fuel_explore` 的 `max_vel`。
+- 完整任务不依赖执行端默认速度：规划速度（用户指定或逐机 `cruise_speed`）由 `build` 写入每架机的 `assignment.speed`，`assemble_plan.py` 用它写 `takeoff`/`follow_path`/`patrol_move` 的 `speed` 和 `fuel_explore` 的 `max_vel`。只有单项动作校验时，校验脚本才补 1.2/0.6 m/s 默认值。
 - 航点格式 `{"longitude":…,"latitude":…,"altitude":…}`，可带工具返回的 `pass_through`；搜索框格式 `[经度,纬度,高度]`。
 
 ## 由任务航迹组装
