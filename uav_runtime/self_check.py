@@ -61,7 +61,8 @@ def check_entrypoints():
 
         for script in ("data-query/scripts/prepare_candidates.py", "spatial-compute/scripts/resolve_jobs.py",
                        "mission-orchestration/scripts/allocate.py", "trajectory-generation/scripts/planning_routes.py",
-                       "mission-planning/scripts/check_task.py", "target-detection/scripts/validate_targets.py"):
+                       "mission-planning/scripts/check_task.py", "mission-planning/scripts/plan_task_graph.py",
+                       "target-detection/scripts/validate_targets.py"):
             invoke("skills/" + script, "--help")
         route = invoke("skills/trajectory-generation/scripts/mock_offline_map.py", "query-path",
                        "--start-lon", "0", "--start-lat", "0", "--end-lon", "0.001", "--end-lat", "0",
@@ -195,6 +196,38 @@ def check_alternatives():
                         "speed": 3.0})
     if overridden["candidates"][0]["planning_speed"] != 3.0:
         raise RuntimeError("用户指定速度未覆盖 cruise_speed")
+
+    altitude_job = {"job_id": "ALT", "name": "altitude", "center": [0.01, 0.0],
+                    "shape": "rectangle", "length": 100, "width": 80,
+                    "task_type": "search", "laps": 1}
+    altitude_candidate = candidate("CHECK-ALT", 20.0)
+    altitude_candidate.update(cruise_speed=8.31, fov=72.0, range_budget=4000.0,
+                              time_budget=10000.0, max_flight_radius=50000.0)
+    try:
+        costs({"operation": "costs", "candidates": [altitude_candidate],
+               "jobs": [altitude_job], "task_type": "search", "flight_alt": 1.2})
+        raise RuntimeError("默认航高应当不可行")
+    except AtomicError as exc:
+        if exc.code != "NO_FEASIBLE_ALLOCATION":
+            raise
+        altitude = exc.details["candidate_screening"]["altitude_alternatives"]
+        if altitude["feasible_count"] != 1 or altitude["items"][0]["altitude_m"] != 5.0:
+            raise RuntimeError("默认航高失败时未给出可用航高备选")
+        if altitude["items"][0]["range_ok"] is not True:
+            raise RuntimeError("航高备选没有通过航程检查")
+
+    # A non-fixed search must not let an unreachable narrow-FOV candidate
+    # inflate the work estimate of the only retained wide-FOV candidate.
+    narrow = candidate("CHECK-NARROW", 20.0)
+    narrow.update(cruise_speed=8.31, fov=72.0, max_flight_radius=500.0)
+    wide = candidate("CHECK-WIDE", 20.0)
+    wide.update(cruise_speed=8.31, fov=91.0, range_budget=10000.0, time_budget=10000.0)
+    result = costs({"operation": "costs", "candidates": [narrow, wide],
+                    "jobs": [altitude_job], "task_type": "search", "flight_alt": 1.2})
+    if result["prepared"]["jobs"][0]["fov_deg"] != 91.0:
+        raise RuntimeError("非固定搜索没有采用可达候选的 FOV")
+    if not 3300 < result["costs"]["work_range"][0] < 3450:
+        raise RuntimeError("非固定搜索的覆盖量仍被不可达候选放大")
 
     # The figure's example: 500x300, lane 75 m, 4 lanes, coverage 2,225 m.
     fov = math.degrees(2 * math.atan(75 / (2 * 50)))

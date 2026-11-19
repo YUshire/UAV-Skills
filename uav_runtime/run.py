@@ -9,6 +9,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--pipeline":
+        sys.path.insert(0, str(ROOT))
+        from uav_runtime.pipeline import main as pipeline_main
+        return pipeline_main(sys.argv[2:])
     if len(sys.argv) < 2:
         print("Usage: python uav_runtime/run.py skills/<name>/scripts/<file>.py [arguments]", file=sys.stderr)
         return 2

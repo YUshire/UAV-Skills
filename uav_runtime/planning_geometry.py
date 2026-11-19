@@ -151,7 +151,7 @@ def search_box(zone, altitude):
     return [west, min(lat for _, lat in samples), 0.3], [east_lon, max(lat for _, lat in samples), round(altitude + 0.5, 3)]
 
 
-def build_steps(prepared, ordered, origin, altitude, timeout, work_speed=None):
+def build_steps(prepared, ordered, origin, altitude, timeout, work_speed=None, include_metrics=False):
     """Connect the actual first/last waypoints of consecutive jobs and the home point."""
     home = previous = lon_lat(origin)
     steps = []
@@ -163,7 +163,12 @@ def build_steps(prepared, ordered, origin, altitude, timeout, work_speed=None):
         transfer = direct_route(previous, lon_lat(waypoints[0]), altitude)
         transit_range += transfer["one_way_distance"]
         job_id = zone["job_id"]
-        steps.append({"type": "transit", "to": job_id, "waypoints": transfer["go_waypoints"]})
+        transit = {"type": "transit", "to": job_id, "waypoints": transfer["go_waypoints"]}
+        if include_metrics:
+            transit.update(estimated_range_m=transfer["one_way_distance"],
+                           estimated_time_s=transfer["one_way_distance"]
+                           / (work_speed or zone["work_speed"]))
+        steps.append(transit)
         if task_type == "search" and zone["shape"] == "rectangle":
             base = search_coverage_m(zone["length"], zone["width"],
                                      zone.get("search_lane_m") or 2.0)
@@ -180,8 +185,16 @@ def build_steps(prepared, ordered, origin, altitude, timeout, work_speed=None):
             low, high = search_box(zone, altitude)
             operation.update(box_min=low, box_max=high,
                              timeout_sec=zone.get("search_timeout", timeout), waypoints=waypoints)
+        if include_metrics:
+            operation.update(estimated_range_m=lap_length,
+                             estimated_time_s=lap_length / (work_speed or zone["work_speed"]))
         steps.append(operation)
         previous = lon_lat(waypoints[-1])
     transfer = direct_route(previous, home, altitude)
-    steps.append({"type": "transit", "to": "home", "waypoints": transfer["go_waypoints"]})
+    transit = {"type": "transit", "to": "home", "waypoints": transfer["go_waypoints"]}
+    if include_metrics:
+        transit.update(estimated_range_m=transfer["one_way_distance"],
+                       estimated_time_s=transfer["one_way_distance"]
+                       / (work_speed or prepared["speeds"]["transit"]))
+    steps.append(transit)
     return steps, transit_range + transfer["one_way_distance"], work_range, work_time
