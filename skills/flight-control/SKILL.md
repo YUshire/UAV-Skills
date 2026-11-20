@@ -32,6 +32,8 @@ uav_runtime/.venv/bin/python uav_runtime/run.py skills/flight-control/scripts/as
 
 返回 `artifact_file` 和每架机的报告摘要。原始 WGS84 序列在 `/data/participants/<索引>/raw_batch`；已转换的本地序列在同一项的 `dry_run.batch`。电量、航程取 `summary.participants`。`UAV_SHOW_ACTIONS` 开关默认 `compact`：`summary.participants[*].actions` 给出动作序列，最终回复用 JSON 代码块展示，长航点数组折叠为 `count/first/last`；设为 `full` 时 `actions` 带完整 `raw_batch` 并附 `local_batch`（大计划可能被截断）；设为 `0` 关闭，只报摘要。普通回复其余部分按 mission-planning 第五节说明任务安排和实际状态，需要文件时提供“完整方案”链接。此脚本只做离线校验，`submitted=false`。
 
+组装中有动作检查失败时，工具在失败结果的 `participants` 返回各机检查状态和原因；整体仍失败且没有动作产物。直接据此区分通过与失败的参与机，不复制组装代码逐机重算；修复失败项并重新组装通过后，才有完整动作方案。
+
 本次交付方案来自多次组装时，汇集对应返回中的全部参与机，逐机展示实际返回的 `actions`；待接受的替代方案同样展示，并标明它改变的约束。未下发、原请求不可行或已经给出摘要表格，都不代替这些 JSON。只汇集本次交付采用的方案，不混入已放弃的版本。每机字段独立写明，不用“同上”或省略号代替；保留工具已有的航点折叠结构。紧凑动作仅供展示，实际注册仍使用产物中的 `raw_batch`。
 
 普通任务离线交付时，另用 `write_file` 将本次 `task_key`、动作产物实际返回的 `artifact_file`、参与机、`targets` 和拟采用的 `policies` 保存到唯一的请求 JSON；无目标时 `targets=[]`，策略沿用下文 authorize 契约。跟踪须保留 `on_first_confirmed="APPROACH_AND_TRACK"` 和实际目标 ID 的 `tracking_target_ids`；线上 profile 引用尚未取得时列为待补，不伪造 ID 或 revision。此文件仅保存意图，不是已授权或已提交的 spec，不能直接用于下发；接通后仍按中央流程获取真实引用并校验。
@@ -73,7 +75,7 @@ uav_runtime/.venv/bin/python uav_runtime/run.py skills/flight-control/scripts/su
 
 `--origin-lat/--origin-lon` 取该机航迹结果里的 `origin`（起飞点），不能用任务中心或某个航点代替。
 
-当前组装采用转换器默认的 10000 米范围上限，用于限制本地 ENU 近似的适用范围，不是飞机航程。候选准备在已知中心时预查同一限制；区域边缘、全部航点及未给中心的任务仍以本次动作校验为准。超限时保留已生成几何结果并报告工具限制，不换原点或调大上限绕过检查。
+坐标转换范围是工具参数，不是飞机航程，也不是固定的业务半径。组装读取转换器当前默认值，实际上限取本次 `summary.max_distance_m`（失败时为 `max_distance_m`）；单项校验显式传入 `--max-distance-m` 时以该次返回的 `conversion.max_distance_m` 为准，未传则用脚本当前默认值。回复按本次返回值换算单位，不沿用旧运行或文档示例中的数值；配置已变时旧预筛结论需重新核对。候选中心预筛不代替全部航点校验；超限时保留几何结果、说明当前配置限制，不擅改原点或参数来使校验通过。
 
 | 结果 | 处理 |
 |---|---|

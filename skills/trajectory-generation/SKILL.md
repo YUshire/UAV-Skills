@@ -19,6 +19,8 @@ uav_runtime/.venv/bin/python uav_runtime/run.py skills/trajectory-generation/scr
 
 `operation=costs` 接收候选记录和已解析区域：
 
+`required_drones`、`allowed_assignments`、`single_owner_jobs` 属于后续 `allocate` 的 `constraints`，不传给 `costs`；`costs` 会从作业生成固定归属及圆形巡逻独占约束。分配时合并成本产物已有约束和用户要求，不覆盖已有约束。
+
 ```json
 {
   "operation": "costs",

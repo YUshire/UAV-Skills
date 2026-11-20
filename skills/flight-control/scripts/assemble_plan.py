@@ -7,7 +7,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from uav_runtime.atomic.common import AtomicError, require, required, run
-from submit_queue_batch import ValidationError, validate_batch
+import submit_queue_batch as batch_validator
 
 
 REPORT_FIELDS = ("uav_id", "flight_alt", "jobs", "battery_level", "flight_remain",
@@ -45,6 +45,8 @@ def compute(request):
     if not assignments:
         raise AtomicError("INVALID_ARGUMENT", "assignments 不能为空")
     participants, seen = [], set()
+    diagnostics, failures = [], []
+    max_distance = batch_validator.DEFAULT_MAX_DISTANCE_M
     for assignment in assignments:
         require(assignment, "assignment", dict)
         uid = required(assignment, "uav_id")
@@ -81,10 +83,14 @@ def compute(request):
         add("land", {})
         origin = require(required(assignment, "origin"), "origin", dict)
         try:
-            batch = validate_batch(raw, origin_lat=required(origin, "latitude"),
-                                   origin_lon=required(origin, "longitude"))
-        except ValidationError as exc:
-            raise AtomicError("INVALID_ARGUMENT", str(exc), uav_id=uid) from exc
+            batch = batch_validator.validate_batch(raw, origin_lat=required(origin, "latitude"),
+                                                   origin_lon=required(origin, "longitude"),
+                                                   max_distance_m=max_distance)
+        except batch_validator.ValidationError as exc:
+            failures.append({"uav_id": uid, "message": str(exc)})
+            diagnostics.append({"uav_id": uid, "status": "INVALID_ARGUMENT",
+                                "message": str(exc), "validated": False, "submitted": False})
+            continue
         report = {key: deepcopy(required(assignment, key)) for key in REPORT_FIELDS}
         report.update(action_count=len(batch), validated=True, submitted=False)
         if SHOW_ACTIONS not in ("0", "false", "off", "no"):
@@ -94,14 +100,21 @@ def compute(request):
         participants.append({"uav_id": uid, "task_id": task_id, "origin": deepcopy(origin),
                              "raw_batch": raw, "dry_run": {"status": "OK", "validated": True,
                              "submitted": False, "action_count": len(batch), "batch": batch}, "report": report})
+        diagnostics.append({"uav_id": uid, "status": "OK", "validated": True,
+                            "submitted": False, "action_count": len(batch)})
+    if failures:
+        raise AtomicError("INVALID_ARGUMENT", failures[0]["message"], uav_id=failures[0]["uav_id"],
+                          max_distance_m=max_distance, validated=False, submitted=False,
+                          validated_for_execution=False, participants=diagnostics)
     output = {"status": "OK", "task_key": task_key, "validated": True, "submitted": False,
               "stage": "VALIDATED", "execution_state": "NOT_STARTED", "validated_for_execution": False,
-              "validation_scope": "action_format_and_coordinate_conversion", "participants": participants}
+              "validation_scope": "action_format_and_coordinate_conversion", "participants": participants,
+              "max_distance_m": max_distance}
     for key in ("mock", "map_used", "whole_mission_budget_complete", "budget_scope", "unused", "jobs"):
         output[key] = deepcopy(required(plan, key))
     output["_summary"] = {key: deepcopy(output[key]) for key in
                           ("task_key", "validated", "submitted", "validated_for_execution", "mock", "map_used",
-                           "whole_mission_budget_complete", "budget_scope")}
+                           "whole_mission_budget_complete", "budget_scope", "max_distance_m")}
     output["_summary"]["participants"] = [p["report"] for p in participants]
     output["_summary"]["show_actions"] = SHOW_ACTIONS
     return output

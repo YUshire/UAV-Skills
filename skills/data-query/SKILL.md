@@ -86,7 +86,7 @@ uav_runtime/.venv/bin/python uav_runtime/run.py skills/data-query/scripts/prepar
 
 省略 `uav_ids` 表示查询全部合格机；候选数不表示实际出动数。保留原预筛条件：三处记录齐全、空闲、电量大于30%、健康度大于60、剩余航程有效、载荷符合明确要求、机型升限满足输入航高。点名候选未全部通过资源/状态预筛时返回 `CANDIDATE_EXCLUDED`，错误中带 `available_candidates`、`available_count`（当前筛选条件下可用的替代机摘要）和 `max_recorded_altitude`（记录中的最高升限）；需要全量替代机时去掉 `uav_ids`、带上作业中心重查，不能只报点名机不可达。无合格机返回 `NO_CANDIDATE`，同样带排除原因和记录中的最高升限。
 
-给出作业中心时还会复用动作转换器检查该点是否在当前转换范围内，默认上限为距登记起飞点 10000 米；以 `summary.coordinate_filter.max_distance_m` 为准。超限原因在 `excluded[*].constraint="COORDINATE_RANGE"`，全部超限返回 `COORDINATE_RANGE_EXCEEDED`；点名机超限返回 `CANDIDATE_EXCLUDED`，不静默删掉点名机。此限制来自工具，不代表物理航程不足；若剩余候选又因预算失败，回复须合并两类排除证据，不能推断全机队物理无解。这里只检查已给中心，不认证整个区域或多作业组合均在范围内，最终仍由动作组装检查全部坐标；未给中心时不作这项预筛。
+给出作业中心时还会复用动作转换器检查该点是否在当前转换范围内，上限动态读取转换器当前默认值；说明本次限制时采用工具返回的 `summary.coordinate_filter.max_distance_m`，失败时读 `coordinate_filter.max_distance_m`，不记忆或写死某个公里数。超限原因在 `excluded[*].constraint="COORDINATE_RANGE"`，全部超限返回 `COORDINATE_RANGE_EXCEEDED`；点名机超限返回 `CANDIDATE_EXCLUDED`，不静默删掉点名机。此限制来自工具，不代表物理航程不足；若剩余候选又因预算失败，回复须合并两类排除证据，不能推断全机队物理无解。这里只检查已给中心，不认证整个区域或多作业组合均在范围内，最终仍由动作组装检查全部坐标；未给中心时不作这项预筛。
 
 需要全机队或全量候选时用本入口（省略 `uav_ids`）；不要用 `SELECT ... LIMIT N` 代替全量。`truncated=false` 只表示本次 SQL 未被服务端截断，不代表查到了全表；用 SQL 统计时先 `COUNT(*)`，需要明细再分页。
 
