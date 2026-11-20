@@ -2,6 +2,7 @@
 from copy import deepcopy
 import importlib.util
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -164,19 +165,59 @@ class AssemblyDiagnosticsTests(unittest.TestCase):
         self.assertEqual([p["validated"] for p in error.exception.details["participants"]], [False] * 3)
 
     def test_success_preserves_action_display_modes(self):
-        for mode in ("compact", "full", "0"):
-            with self.subTest(mode=mode), patch.object(assembler, "SHOW_ACTIONS", mode):
+        for mode in ("true", "false", "compact", "full", "0", "off", "no"):
+            with self.subTest(mode=mode), patch.object(assembler, "SHOW_ACTIONS", True), \
+                    patch.object(assembler, "SHOW_ACTIONS_MODE", mode):
                 result = assembler.compute(plan_input())
                 self.assertTrue(result["validated"])
                 self.assertEqual(len(result["participants"]), 3)
+                self.assertIs(result["_summary"]["show_actions"], True)
+                self.assertEqual(result["_summary"]["actions_format"], "full" if mode == "full" else "compact")
                 for row in result["_summary"]["participants"]:
-                    if mode == "0":
-                        self.assertNotIn("actions", row)
-                    elif mode == "full":
+                    if mode == "full":
                         self.assertIsInstance(row["actions"][2]["params"]["waypoints"], list)
                         self.assertIn("local_batch", row)
                     else:
                         self.assertEqual(row["actions"][2]["params"]["waypoints"]["count"], 1)
+
+                with patch.object(assembler, "SHOW_ACTIONS", False):
+                    hidden = assembler.compute(plan_input())
+                self.assertIs(hidden["_summary"]["show_actions"], False)
+                for row in hidden["_summary"]["participants"]:
+                    self.assertNotIn("actions", row)
+                    self.assertNotIn("local_batch", row)
+
+    def test_script_default_switch_controls_real_cli_without_changing_actions(self):
+        with tempfile.TemporaryDirectory(prefix="uav-action-display-") as tmp:
+            root = Path(tmp)
+            for name in ("uav_runtime", "skills"):
+                shutil.copytree(ROOT / name, root / name,
+                                ignore=shutil.ignore_patterns(".venv", "__pycache__"))
+            relative = "skills/flight-control/scripts/assemble_plan.py"
+            script = root / relative
+            original = script.read_text()
+            self.assertTrue(any(f"SHOW_ACTIONS = {v}  #" in original for v in (True, False)))
+            env = os.environ.copy()
+            env.pop("UAV_SHOW_ACTIONS", None)
+            batches = []
+            for enabled in (True, False):
+                source = original
+                for value in (True, False):
+                    source = source.replace(f"SHOW_ACTIONS = {value}  #", f"SHOW_ACTIONS = {enabled}  #", 1)
+                script.write_text(source)
+                process = subprocess.run([sys.executable, "-B", str(root / "uav_runtime/run.py"),
+                                          relative, "--input", json.dumps(plan_input())],
+                                         cwd=root, env=env, capture_output=True, text=True)
+                self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+                result = json.loads(process.stdout)
+                self.assertIs(result["summary"]["show_actions"], enabled)
+                self.assertTrue(result["validated"])
+                self.assertTrue(result["artifact_created"])
+                for row in result["summary"]["participants"]:
+                    self.assertEqual("actions" in row, enabled)
+                artifact = json.loads(Path(result["artifact_file"]).read_text())["data"]
+                batches.append([(row["raw_batch"], row["dry_run"]) for row in artifact["participants"]])
+            self.assertEqual(batches[0], batches[1])
 
 
 if __name__ == "__main__":

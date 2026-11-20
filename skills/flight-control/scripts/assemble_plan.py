@@ -12,7 +12,8 @@ import submit_queue_batch as batch_validator
 
 REPORT_FIELDS = ("uav_id", "flight_alt", "jobs", "battery_level", "flight_remain",
                  "range_budget", "time_budget", "estimated_range_m", "estimated_battery_after")
-SHOW_ACTIONS = os.environ.get("UAV_SHOW_ACTIONS", "compact").strip().lower()
+SHOW_ACTIONS = True  # True 展示动作 JSON；False 不展示，仍组装、校验和保存完整动作。
+SHOW_ACTIONS_MODE = os.environ.get("UAV_SHOW_ACTIONS", "compact").strip().lower()
 
 
 def _actions_view(raw):
@@ -93,9 +94,9 @@ def compute(request):
             continue
         report = {key: deepcopy(required(assignment, key)) for key in REPORT_FIELDS}
         report.update(action_count=len(batch), validated=True, submitted=False)
-        if SHOW_ACTIONS not in ("0", "false", "off", "no"):
-            report["actions"] = deepcopy(raw) if SHOW_ACTIONS == "full" else _actions_view(raw)
-            if SHOW_ACTIONS == "full":
+        if SHOW_ACTIONS:
+            report["actions"] = deepcopy(raw) if SHOW_ACTIONS_MODE == "full" else _actions_view(raw)
+            if SHOW_ACTIONS_MODE == "full":
                 report["local_batch"] = deepcopy(batch)
         participants.append({"uav_id": uid, "task_id": task_id, "origin": deepcopy(origin),
                              "raw_batch": raw, "dry_run": {"status": "OK", "validated": True,
@@ -117,6 +118,7 @@ def compute(request):
                            "whole_mission_budget_complete", "budget_scope", "max_distance_m")}
     output["_summary"]["participants"] = [p["report"] for p in participants]
     output["_summary"]["show_actions"] = SHOW_ACTIONS
+    output["_summary"]["actions_format"] = "full" if SHOW_ACTIONS_MODE == "full" else "compact"
     return output
 
 

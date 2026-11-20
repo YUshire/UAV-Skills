@@ -30,11 +30,17 @@ uav_runtime/.venv/bin/python uav_runtime/run.py skills/flight-control/scripts/as
   --input '{"plan":{"ref":"<build实际返回的artifact_file>","select":"/data"}}'
 ```
 
-返回 `artifact_file` 和每架机的报告摘要。原始 WGS84 序列在 `/data/participants/<索引>/raw_batch`；已转换的本地序列在同一项的 `dry_run.batch`。电量、航程取 `summary.participants`。`UAV_SHOW_ACTIONS` 开关默认 `compact`：`summary.participants[*].actions` 给出动作序列，最终回复用 JSON 代码块展示，长航点数组折叠为 `count/first/last`；设为 `full` 时 `actions` 带完整 `raw_batch` 并附 `local_batch`（大计划可能被截断）；设为 `0` 关闭，只报摘要。普通回复其余部分按 mission-planning 第五节说明任务安排和实际状态，需要文件时提供“完整方案”链接。此脚本只做离线校验，`submitted=false`。
+返回 `artifact_file` 和每架机的报告摘要。原始 WGS84 序列在 `/data/participants/<索引>/raw_batch`；已转换的本地序列在同一项的 `dry_run.batch`。电量、航程取 `summary.participants`。此脚本只做离线校验，`submitted=false`。
+
+**动作展示开关**：修改 `scripts/assemble_plan.py` 顶部的 `SHOW_ACTIONS = True` / `False`；这是是否展示动作的唯一开关。模型沿用本次工具返回的布尔值 `summary.show_actions`，不得自行改变用户选定的开关：
+- `true`：最终回复必须用 JSON 代码块展示本次交付方案实际返回的 `summary.participants[*].actions`；缺少动作结果时说明原因，不补造。默认长航点折叠为 `count/first/last`。
+- `false`：最终回复不展示动作序列，保留任务安排、检查结果和必要文件链接；不另读 `raw_batch` 或手写动作绕过关闭设置。关闭展示不跳过组装、校验及完整动作产物保存。
+
+原环境变量 `UAV_SHOW_ACTIONS` 仅保留展示格式选择：`full` 返回完整动作及 `local_batch`，其他值默认紧凑展示；旧值 `false` / `0` / `off` / `no` 不再关闭展示，关闭统一修改上述布尔开关。`summary.actions_format` 说明返回动作的展示格式。普通回复其余内容按 mission-planning 第五节处理。
 
 组装中有动作检查失败时，工具在失败结果的 `participants` 返回各机检查状态和原因；整体仍失败且没有动作产物。直接据此区分通过与失败的参与机，不复制组装代码逐机重算；修复失败项并重新组装通过后，才有完整动作方案。
 
-本次交付方案来自多次组装时，汇集对应返回中的全部参与机，逐机展示实际返回的 `actions`；待接受的替代方案同样展示，并标明它改变的约束。未下发、原请求不可行或已经给出摘要表格，都不代替这些 JSON。只汇集本次交付采用的方案，不混入已放弃的版本。每机字段独立写明，不用“同上”或省略号代替；保留工具已有的航点折叠结构。紧凑动作仅供展示，实际注册仍使用产物中的 `raw_batch`。
+开启展示时，本次交付方案来自多次组装则汇集对应返回中的全部参与机，逐机展示实际返回的 `actions`；待接受的替代方案同样展示，并标明它改变的约束。未下发、原请求不可行或已经给出摘要表格，都不代替开启状态下要求的 JSON。只汇集本次交付采用的方案，不混入已放弃的版本。每机字段独立写明，不用“同上”或省略号代替；保留工具已有的航点折叠结构。紧凑动作仅供展示，实际注册仍使用产物中的 `raw_batch`。
 
 普通任务离线交付时，另用 `write_file` 将本次 `task_key`、动作产物实际返回的 `artifact_file`、参与机、`targets` 和拟采用的 `policies` 保存到唯一的请求 JSON；无目标时 `targets=[]`，策略沿用下文 authorize 契约。跟踪须保留 `on_first_confirmed="APPROACH_AND_TRACK"` 和实际目标 ID 的 `tracking_target_ids`；线上 profile 引用尚未取得时列为待补，不伪造 ID 或 revision。此文件仅保存意图，不是已授权或已提交的 spec，不能直接用于下发；接通后仍按中央流程获取真实引用并校验。
 
