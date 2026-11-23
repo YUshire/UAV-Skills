@@ -3,25 +3,16 @@ name: flight-control
 description: 把已生成的任务航迹组装成每架无人机的原始 WGS84 动作序列，用 dry-run 做格式校验和坐标转换检查，并通过中央服务完成下发与运行控制。用于动作组装、校验、中央提交及运行处置。
 ---
 
-# 动作序列与中央下发
+# 动作组装、校验与执行路由
 
-## 动作
+| 当前请求 | 读取与处理 |
+|---|---|
+| 从本次 build 产物生成完整动作 | 按下文组装，不另读数组字段或在线命令页 |
+| 检查用户已有动作数组，或排查动作字段 | 读 [action-validation.md](references/action-validation.md)，仅做 dry-run |
+| 确认、修改、取消待确认方案，或普通方案准备提交 | 读 [online-submission.md](references/online-submission.md)，执行确认与中央流程 |
+| 已提交任务的查询、控制、事件或异常 | 读已有 [runtime-control.md](references/runtime-control.md) |
 
-每条动作：`{"cmd":"<动作>","task_id":"<task_id>","step_id":<序号>,"params":{…}}`。同一序列的 `task_id` 相同，`step_id` 从 1 起按顺序加 1。
-
-| 动作 | 必须写的 params | 只在用户明确指定时写 |
-|---|---|---|
-| `arm` | `{}` | — |
-| `takeoff` | `altitude`（该机 `flight_alt`） | `speed` |
-| `follow_path` | `waypoints`、`"skip_unreachable": false` | `speed` |
-| `fuel_explore` | `box_min`、`box_max`、`timeout_sec` | `max_vel` |
-| `patrol_move` | `waypoints`、`"skip_unreachable": false` | `speed` |
-| `land` | `{}` | — |
-
-- 完整任务不依赖执行端默认速度：规划速度（用户指定或逐机 `cruise_speed`）由 `build` 写入每架机的 `assignment.speed`，`assemble_plan.py` 用它写 `takeoff`/`follow_path`/`patrol_move` 的 `speed` 和 `fuel_explore` 的 `max_vel`。只有单项动作校验时，校验脚本才补 1.2/0.6 m/s 默认值。
-- 航点格式 `{"longitude":…,"latitude":…,"altitude":…}`，可带工具返回的 `pass_through`；搜索框格式 `[经度,纬度,高度]`。
-
-## 由任务航迹组装
+## 从规划产物组装
 
 使用脚本直接读取本次 build 产物，完成组装、dry-run 并保存完整结果：
 
@@ -30,147 +21,37 @@ uav_runtime/.venv/bin/python uav_runtime/run.py skills/flight-control/scripts/as
   --input '{"plan":{"ref":"<build实际返回的artifact_file>","select":"/data"}}'
 ```
 
-返回 `artifact_file` 和每架机的报告摘要。原始 WGS84 序列在 `/data/participants/<索引>/raw_batch`；已转换的本地序列在同一项的 `dry_run.batch`。电量、航程取 `summary.participants`。此脚本只做离线校验，`submitted=false`。
+此脚本组装并校验，不下发（`submitted=false`）。命令响应与保存文件是两种结构，不猜字段位置：
+
+| 读取来源 | 数据位置 |
+|---|---|
+| 本次命令响应 | `summary.participants[*]` 含电量、航程、航高及动作展示；`summary.show_actions` 是本次展示开关 |
+| `artifact_file` 保存文件 | `data.participants[*].report` 是对应逐机报告；文件顶层没有 `summary` |
+| 保存文件中的可注册动作 | `data.participants[*].raw_batch` 为原始 WGS84 完整数组 |
+| 保存文件中的校验结果 | `data.participants[*].dry_run.batch` 为已转换的本地坐标数组，不能重新转换或注册 |
+
+优先复用本次命令返回的报告。输出被截断且确实缺交付字段时，只按上述路径读取所缺参与机/字段；不整份打印产物或再次拼接所有动作造成截断。动作是否展示仍由本次 `summary.show_actions` 决定，不因文件里有动作而绕过关闭设置。
 
 **动作展示开关**：修改 `scripts/assemble_plan.py` 顶部的 `SHOW_ACTIONS = True` / `False`；这是是否展示动作的唯一开关。模型沿用本次工具返回的布尔值 `summary.show_actions`，不得自行改变用户选定的开关：
 - `true`：最终回复必须用 JSON 代码块展示本次交付方案实际返回的 `summary.participants[*].actions`；缺少动作结果时说明原因，不补造。默认长航点折叠为 `count/first/last`。
 - `false`：最终回复不展示动作序列，保留任务安排、检查结果和必要文件链接；不另读 `raw_batch` 或手写动作绕过关闭设置。关闭展示不跳过组装、校验及完整动作产物保存。
 
-原环境变量 `UAV_SHOW_ACTIONS` 仅保留展示格式选择：`full` 返回完整动作及 `local_batch`，其他值默认紧凑展示；旧值 `false` / `0` / `off` / `no` 不再关闭展示，关闭统一修改上述布尔开关。`summary.actions_format` 说明返回动作的展示格式。普通回复其余内容按 mission-planning 第五节处理。
+原环境变量 `UAV_SHOW_ACTIONS` 仅保留展示格式选择：`full` 返回完整动作及 `local_batch`，其他值默认紧凑展示；旧值 `false` / `0` / `off` / `no` 不再关闭展示，关闭统一修改上述布尔开关。`summary.actions_format` 说明返回动作的展示格式。完整方案的其余回复内容按 [交付规范](../mission-planning/references/plan-delivery.md) 处理；单项校验仅回复本项结果。
 
-组装中有动作检查失败时，工具在失败结果的 `participants` 返回各机检查状态和原因；整体仍失败且没有动作产物。直接据此区分通过与失败的参与机，不复制组装代码逐机重算；修复失败项并重新组装通过后，才有完整动作方案。
+组装失败时读 [组装诊断](../mission-planning/references/diagnostics.md#动作组装与校验)，据本次 `participants` 交付检查范围。
 
 开启展示时，本次交付方案来自多次组装则汇集对应返回中的全部参与机，逐机展示实际返回的 `actions`；待接受的替代方案同样展示，并标明它改变的约束。未下发、原请求不可行或已经给出摘要表格，都不代替开启状态下要求的 JSON。只汇集本次交付采用的方案，不混入已放弃的版本。每机字段独立写明，不用“同上”或省略号代替；保留工具已有的航点折叠结构。紧凑动作仅供展示，实际注册仍使用产物中的 `raw_batch`。
 
-普通任务离线交付时，另用 `write_file` 将本次 `task_key`、动作产物实际返回的 `artifact_file`、参与机、`targets` 和拟采用的 `policies` 保存到唯一的请求 JSON；无目标时 `targets=[]`，策略沿用下文 authorize 契约。跟踪须保留 `on_first_confirmed="APPROACH_AND_TRACK"` 和实际目标 ID 的 `tracking_target_ids`；线上 profile 引用尚未取得时列为待补，不伪造 ID 或 revision。此文件仅保存意图，不是已授权或已提交的 spec，不能直接用于下发；接通后仍按中央流程获取真实引用并校验。
+普通任务离线交付时，另用 `write_file` 将本次 `task_key`、动作产物实际返回的 `artifact_file`、参与机、`targets` 和拟采用的 `policies` 保存到唯一的请求 JSON；无目标时 `targets=[]`，默认 `policies.land_on_return=true`；无目标任务结束后不返航时设 `on_search_complete="HOLD"`。跟踪须保留 `on_first_confirmed="APPROACH_AND_TRACK"` 和实际目标 ID 的 `tracking_target_ids`；线上 approach/tracking profile 引用须来自真实 status；尚未取得时列为待补，不伪造 ID 或 revision，在线绑定写法仅提交时读参考页。此文件仅保存意图，不是已授权或已提交的 spec，不能直接用于下发；接通后仍按中央流程获取真实引用并校验。
 
-以下是组装采用的映射规则。
+完整任务的速度沿用 build 的 `assignment.speed`（用户指定或逐机巡航速度），不是仅用户给速时才填写；组装器写入各动作的 speed/max_vel，不依赖执行端默认速度。按每机 steps 保留 search/patrol 类型、顺序、圈数和搜索时限；航点与搜索框不手改。动作字段的具体映射仅调试时读数组校验页。
 
-对任务航迹 `planning_routes.py` 的 `build` 结果中的每个 `assignments[i]`（完整数据在返回文件的 `data` 中）：
-
-1. `task_id` = `<task_key>-<uav_id>`，例如 `T1021153012a3f2-UAV-003`。
-2. 依次写：`arm` → `takeoff`（`altitude` = `flight_alt`）→ 按 `steps` 顺序转换 → `land`。同一架机的 `steps` 可混合 `search` 和 `patrol`，各步按自己的类型、`laps` 和 `timeout_sec` 组装，不套用整任务的单一类型：
-   - `transit` → `follow_path`，`waypoints` 原样复制；
-   - `search` → `fuel_explore`，复制 `box_min`、`box_max`、`timeout_sec`；
-   - `patrol` → `patrol_move`，`waypoints` 原样复制，重复 `laps` 次（每圈一条动作）。
-3. 航点和搜索框逐字复制，不取整、不删点、不调整顺序。
+## 航高与结束策略边界
 
 `fuel_explore` 的 `box_min[2]`/`box_max[2]` 是搜索空间上下界，当前组装接口没有独立的定高参数；例如 80 米方案的 `[0.3,80.5]` 不证明探索全程保持 80 米。用户明确要求定高时，保留已算的几何方案并说明搜索阶段定高尚未验证，不把格式校验成功说成定高要求已满足，也不靠手改搜索框实现定高。
 
 用户要求无目标探索/巡逻完成后原地悬停时，仍保留 `build` 给出的返航转场和 `land`，作为中央登记需要的备用收尾段；另在方案中明确 `policies.on_search_complete="HOLD"`。中央把作业段和返航段分开，由策略或后续返航指令决定是否执行收尾，不是把整个 batch 直接连续发布。离线只验证格式与转换，不能称已经验证悬停执行或无限等待续航；不能删除返航段来“实现HOLD”。
 
-一架机一个搜索作业的紧凑展示示例（实际回复采用本次工具返回值）：
+转换范围不是物理航程：组装读取转换器当前默认值，采用本次 `summary.max_distance_m`（失败时 `max_distance_m`），不记忆公里数；候选中心预筛不代表全部航点已通过。单项显式范围参数见数组校验页。
 
-```json
-[
-  {"cmd":"arm","task_id":"T1021153012a3f2-UAV-003","step_id":1,"params":{}},
-  {"cmd":"takeoff","task_id":"T1021153012a3f2-UAV-003","step_id":2,"params":{"altitude":1.2}},
-  {"cmd":"follow_path","task_id":"T1021153012a3f2-UAV-003","step_id":3,"params":{"waypoints":{"count":2,"first":{"longitude":118.7273,"latitude":31.1747,"altitude":1.2},"last":{"longitude":118.727366,"latitude":31.174749,"altitude":1.2}},"skip_unreachable":false}},
-  {"cmd":"fuel_explore","task_id":"T1021153012a3f2-UAV-003","step_id":4,"params":{"box_min":[118.727366,31.174749,0.3],"box_max":[118.727492,31.174848,1.7],"timeout_sec":1200.0}},
-  {"cmd":"follow_path","task_id":"T1021153012a3f2-UAV-003","step_id":5,"params":{"waypoints":{"count":2,"first":{"longitude":118.727366,"latitude":31.174749,"altitude":1.2},"last":{"longitude":118.7273,"latitude":31.1747,"altitude":1.2}},"skip_unreachable":false}},
-  {"cmd":"land","task_id":"T1021153012a3f2-UAV-003","step_id":6,"params":{}}
-]
-```
-
-## 只规划：dry-run 校验
-
-```bash
-uav_runtime/.venv/bin/python uav_runtime/run.py skills/flight-control/scripts/submit_queue_batch.py \
-  --json '<动作序列 JSON 数组>' --origin-lat <origin.latitude> --origin-lon <origin.longitude> --dry-run
-```
-
-`--origin-lat/--origin-lon` 取该机航迹结果里的 `origin`（起飞点），不能用任务中心或某个航点代替。
-
-坐标转换范围是工具参数，不是飞机航程，也不是固定的业务半径。组装读取转换器当前默认值，实际上限取本次 `summary.max_distance_m`（失败时为 `max_distance_m`）；单项校验显式传入 `--max-distance-m` 时以该次返回的 `conversion.max_distance_m` 为准，未传则用脚本当前默认值。回复按本次返回值换算单位，不沿用旧运行或文档示例中的数值；配置已变时旧预筛结论需重新核对。候选中心预筛不代替全部航点校验；超限时保留几何结果、说明当前配置限制，不擅改原点或参数来使校验通过。
-
-| 结果 | 处理 |
-|---|---|
-| `status=OK`，`submitted=false` | 校验通过 |
-| `INVALID_ARGUMENT` | 按 `message` 修正序列后重试一次，仍失败就报告 |
-| `ERROR` | 报告错误并停止 |
-
-返回中的 `batch` 是已转换为该机 MAVROS 本地坐标、补齐默认参数的 ROS 飞控动作序列；它不能再交给 register-plan 或任何转换命令（不能二次转换）。任务规划使用上面的组装脚本保存并交付完整结果；单项“校验动作序列”请求用这条命令，已有数组文件可用 `--file <路径>` 代替 `--json`。
-
-通用 dry-run 不执行中央任务的作业/收尾校验：纯转场数组、删掉返航段的数组可能通过格式校验，但不能据此称当前中央任务支持它。完整任务还须满足本技能末尾的中央计划规则；单项动作校验无需强加搜索或巡逻。
-
-## 执行：中央下发四步
-
-按 mission-planning 判定执行授权：明确的动作指令直接进入以下流程；用户要求“确认后执行”或方案改变了明确约束时，先取得对应确认。只规划请求使用上面的 dry-run。
-
-本节依赖外部部署的 `mission_client.py`、中央服务和 ROS 环境，配置以 AGENTS.md 的环境检查为准。离线工作区缺少这些组件时完成上面的 dry-run 并报告未下发，不能把本地路径设成 `MIGRATION_ROOT` 来代替部署。
-
-所有中央命令的写法：
-
-```bash
-python3 "$MIGRATION_ROOT/scripts/mission_client.py" <操作> --agent-session-id "$NANOBOT_SESSION_ID" --json '<JSON>'
-```
-
-`status` 不带 `--json`：`python3 "$MIGRATION_ROOT/scripts/mission_client.py" status --agent-session-id "$NANOBOT_SESSION_ID"`。
-
-`request_id` 只有 register-plan、submit 和运行控制需要；authorize、preview 没有 `request_id`。
-
-**1. register-plan**（每架机一次，可并行）：
-
-```json
-{"request_id":"reg-<task_key>-<uav_id>","uav_id":"<uav_id>","batch":[原始 WGS84 动作序列],
- "perception":{"query_id":"<该机 query_id>","session_id":"<该机 session_id>"}}
-```
-
-- `batch` 使用本次组装的原始 WGS84 序列；有已确认卡时逐字复制卡片中该机的序列。
-- 没有目标时省略 `perception`；有目标时取 `status` 返回的 `fleet.<uav_id>.perception`，两个值必须完全一致。
-- 注册时会用与 dry-run 相同的校验器检查序列，执行模式下不必另做 dry-run。成功返回 `plan_ref`。
-
-**2. authorize**（整个任务一次）：
-
-```json
-{"user_intent":"<用户的原始执行指令>",
- "spec":{"participants":[{"uav_id":"UAV-003","plan_ref":{"id":"plan-…","revision":1}}],
-         "targets":[目标清单，没有目标时为 []],
-         "policies":{"land_on_return":true},
-         "authorization_ref":"pending-authorization"}}
-```
-
-`user_intent` 写真实的原始执行指令；用户另外确认过方案时追加“；用户确认：<确认原话>”，没有该回复就不添加。中央会把它和 spec 摘要一起存进授权记录。故障补做写“<原指令>；故障补做：<故障机> 未完成的 <作业名>”。取返回结果中的 `spec` 字段（已带真实 `authorization_ref`），后面两步原样使用这份 `spec`。用户要求“发现后跟踪”时，`policies` 改为：
-
-```json
-{"land_on_return":true,"on_first_confirmed":"APPROACH_AND_TRACK","tracking_target_ids":["<target_id>"],
- "approach_profile_ref":{"id":"approach-default","revision":7},"tracking_profile_ref":{"id":"tracking-default","revision":1}}
-```
-
-两个 profile 的 id 和 revision 以 `status.target_action_profiles` 的返回为准。跟踪时长、距离由 profile 固定，用户另指定时说明暂不支持修改。用户明确要求任务结束后不返航时，在 `policies` 里加 `"on_search_complete":"HOLD"`（作业完成后原地悬停，等待后续指令）。
-
-**3. preview**：`{"spec":<authorize 返回的 spec>}`，返回 `preview_id`（60 s 内有效，只能用一次），拿到后立即 submit。
-
-**4. submit**：
-
-```bash
-python3 "$MIGRATION_ROOT/scripts/mission_client.py" submit --agent-session-id "$NANOBOT_SESSION_ID" \
-  --json '{"request_id":"submit-<task_key>","preview_id":"<preview_id>","agent_session_id":"'"$NANOBOT_SESSION_ID"'","spec":<同一份 spec>}'
-```
-
-返回 `mission_id` 和 `status=ACCEPTED`，表示任务已创建，不表示已起飞或已完成。
-
-## 失败处理
-
-| 错误码 | 处理 |
-|---|---|
-| `INVALID_PLAN`、`INVALID_INPUT` | 按 `message` 修正明确的格式或参数错误后重试一次；涉及用户明确约束或已确认动作的变化时，说明差异并重新取得接受 |
-| `UAV_UNAVAILABLE`、`UAV_BUSY` | 该机不在线或被占用：停止并报告 |
-| `PERCEPTION_UNAVAILABLE` | 感知引用与当前会话不一致：重新读 `status` 的 `fleet.<uav_id>.perception` 再注册 |
-| `EXECUTION_DISABLED`、`ADAPTER_UNAVAILABLE`、`SERVICE_RECOVERING` | 服务当前不能执行：报告并停止 |
-| `PREVIEW_EXPIRED`、`PREVIEW_CONSUMED` | 用同一份 `spec` 重新 preview，再 submit |
-| `PREVIEW_CHANGED` | submit 的 `spec` 必须与 preview 完全相同 |
-| `IDEMPOTENCY_CONFLICT` | 同一 `request_id` 用了不同内容：恢复原内容，或确认是新动作后换新 ID |
-| 网络超时、结果不明 | 先 `get`/`events` 确认；需要重试时沿用同一 `request_id` |
-
-## 运行控制
-
-暂停、继续、返航、取消、跟踪控制、待决策处理和故障诊断，读 [references/runtime-control.md](references/runtime-control.md)。
-
-## 注意事项
-
-- 中央接管的机只接受中央控制：不要用 `submit_queue_batch.py` 去掉 `--dry-run` 发布，也不要用 `fleet_dispatch.py` 或直接发布 ROS 动作话题。
-- `register-plan` 只接受原始 WGS84 序列；dry-run 输出（带 `_coordinates_already_mavros`）不能再提交。
-- 中央计划的规则：以 `arm`、`takeoff` 开头；至少一个 `fuel_explore` 或 `patrol_move`；以 `follow_path`（可再加 `land`）结尾；`fuel_explore` 必须写 `timeout_sec`；不能用 `repeat`、`loop_forever`，多圈要逐圈展开。
-- `user_intent` 中如有英文单引号要去掉，否则会破坏 `--json '…'` 的引号。
-- 计划注册成功、已授权、已提交、已执行是四件不同的事，按实际返回分别报告。
+中央接管的机只用中央提交和运行控制，不直接发布动作队列或 ROS 话题。完整任务、只规划及备选接受边界按 mission-planning；单项数组校验不强加完整搜索/巡逻要求。

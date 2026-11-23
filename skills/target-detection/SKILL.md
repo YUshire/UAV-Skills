@@ -5,6 +5,9 @@ description: 管理每架无人机的目标感知：把用户要找的目标整�
 
 # 目标感知
 
+目标清单及离线校验按本页；**仅开启/更新/停止识别、查询进度或在线下发前**读 [online-perception.md](references/online-perception.md)。单项感知不生成飞行动作，只规划不启动感知。
+
+
 ## 目标清单
 
 用户要找的每个目标拆成一项。同一任务的所有参与机共用同一份清单和同一个 `search_id`：
@@ -27,75 +30,38 @@ description: 管理每架无人机的目标感知：把用户要找的目标整�
 - 颜色、衣着写在 `description`，不写进 `category`（不要写成 `red person`）。
 - 中央任务 `authorize` 的 `targets` 使用同一份清单（只取 `targets` 数组）。
 - 探索、建图任务没有目标，不启动感知。
-- “查看、看看、扫一遍”按 mission-planning 解析；上下文有搜索对象就沿用，否则按无目标区域查看处理。已给出的可识别类别或外观足以表达目标时直接整理清单，不追问额外特征。
+- “查看、看看、扫一遍”结合当前请求解析；上下文有搜索对象就沿用，否则按无目标区域查看处理。已给出的可识别类别或外观足以表达目标时直接整理清单，不追问额外特征。
 
 ## 扫描对象与检测目标
 
 - “扫描战壕”“沿路扫描”中的战壕、道路是**扫描对象**，放在任务图 `scan` 步骤（`params.targets`/`description`）或扫描要求里，不放进 COCO `targets`。
 - `targets` 只放检测/跟踪对象，例如“移动人员”；`category` 仍用 COCO 类名。
 - 设计好的扫描/识别/跟踪接口默认保留并按可用规划，后续补充实现；不因 `backend_verified=false` 或能力未验证拒绝任务。
-- `validate_targets` 只校验格式和该机状态/资源库记录，`backend_verified=false`；它不证明类别受后端支持，也不证明识别能力。不要用试填类别推断能力。
 - 目标清单不替代扫描要求；扫描对象不要用 target 条目表示。
 
-## 命令
 
-下列在线命令需要已部署的外部运行项目、ROS 环境和中央服务；先按 AGENTS.md 检查环境。本工作区自带的离线目标校验见下节。
 
-```bash
-source "$ROS_SETUP" && source "$CATKIN_SETUP" && \
-/usr/bin/python3 "$MIGRATION_ROOT/scripts/uav_perception.py" <命令> --uav-id <uav_id> --query-json '<JSON>'
-```
+## 本地离线校验
 
-| 命令 | 用途 | `--query-json` | 成功返回 |
-|---|---|---|---|
-| `status` | 查该机感知是否在运行 | 不需要 | 状态 JSON；`NOT_RUNNING` 表示未运行 |
-| `start` | 启动感知并设置目标清单 | 目标清单对象 | `status=STARTED`、`ready=true`、`session_id`、`query_id` |
-| `query` | 感知已在运行时，换成新的目标清单 | 目标清单对象 | `state=ACCEPTED`、`query_id` |
-| `progress` | 查已找到和未找到的目标 | `{"search_id":"<search_id>"}` | 已找到与剩余的 `target_id` |
-| `stop` | 停止该机感知 | 不需要 | `state=STOPPED` |
-
-感知始终以默认的 `detect-and-continue`（只检测，不接管飞行）模式运行，不加 `--mode`。
-
-**本地离线校验**：不需要 ROS 或外部运行项目，命令为
+本地离线校验：不需要 ROS 或外部运行项目，命令为
 
 ```bash
 uav_runtime/.venv/bin/python uav_runtime/run.py skills/target-detection/scripts/validate_targets.py \
   --uav-id <uav_id> --query-json '<含search_id和targets的目标清单对象>'
 ```
 
-返回 `validated=true`、`submitted=false`、`perception_started=false`、`backend_verified=false`，校验范围为目标格式和该机的状态/资源库记录。在线部署后仍须检查真实感知后端；该结果不代表感知已启动或目标已找到。
+返回 `validated=true`、`submitted=false`、`perception_started=false`、`backend_verified=false`；只证明目标格式和机队记录通过，不证明类别受后端支持、识别效果、感知已启动或目标已找到。不得用试填类别推断能力；面向用户说“目标配置已检查，实际识别能力尚未验证”。
 
-离线交付带目标的方案时，用日常语言说明“目标配置已检查，实际识别能力尚未验证”，不只写“已检查通过”。要求发现后跟踪时，按 flight-control 的离线交付规则保存目标与拟用策略，并说明跟踪尚待服务接通验证；不把目标格式校验当作跟踪能力验证。策略字段留在方案文件中，普通回复无需罗列内部字段。
+要求发现后跟踪时，按 flight-control 的离线交付规则保存目标与拟用策略，并说明跟踪尚待服务接通验证；不把目标格式校验当作跟踪能力验证。策略字段留在方案文件中，普通回复无需罗列内部字段。
 
-## 下发前的感知准备
-
-1. 对每架参与机（可并行）：先 `status`；返回 `NOT_RUNNING` 用 `start`，已在运行用 `query` 换成本任务清单（会话不变，`query_id` 换新）。
-2. 全部成功后，用 `mission_client.py status` 读 `fleet.<uav_id>.perception`，作为该机 `register-plan` 的 `perception`；这里的值才是中央认可的当前会话。
-3. 任一机失败：停止流程，不下发飞行；本任务新启动的感知全部 `stop`。
-
-## 单项请求
-
-- 开启识别：机号和目标优先从本轮指令、当前任务及会话已明确的对象取得；仍有多架候选且无法判断指向，或完全没有识别对象时，才询问缺项。不生成飞行动作。
-- “还剩哪些目标”：`progress` 查一次后回答，不循环查询。
-- 停止识别：`stop`。
+目标格式报错且修正明确时重试一次；其他失败停止依赖步骤，在线会话错误仅涉及在线操作时读参考页。
 
 ## 发现通知的回复
 
 收到目标发现通知时，用一两句话说明哪架机发现了哪个目标；不输出事件 ID、坐标、日志或推理过程，也不承诺持续监控。感知不可用的通知同样用一句话说明。
 
-## 失败处理
+## 结果语义
 
-| 情况 | 处理 |
-|---|---|
-| 目标清单格式报错 | 按报错修正一次 |
-| “感知未产生有效观测”、启动超时 | 报告该机感知启动失败，停止依赖它的下发 |
-| “本机感知实例已经运行或正在启动” | 改用 `query` |
-| “先停止本机目标行为，再修改其感知查询” | 该机有旧目标行为在运行：报告，不自行停止正在执行的任务 |
-| “感知查询未确认”或被拒绝 | 报告；不能把旧会话当作新清单已生效 |
-
-## 注意事项
-
-- 跟踪由中央任务策略执行（见 flight-control 的 authorize）。感知只用默认的检测模式启动；不要用 `track-target`、`detect-and-return` 模式，也不要用 `start_target_tracking.py` 启动旧的目标行为节点。
 - 目标是否找到以中央复核为准：逐个 `target_id` 看 MATCH。YOLO 框只是候选；NO_MATCH、UNKNOWN 都不等于目标不存在。
 - 检测不到粗类别时不会触发语义复核，不能据此断言现场没有目标。
 - 目标位置缺失时如实说明，不用无人机位置代替目标位置。
