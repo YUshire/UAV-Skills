@@ -1,6 +1,6 @@
 # 运行控制
 
-任务提交后的查询、控制、待决策处理和故障诊断。根据用户请求和中央最新事件选择适用操作；这里只给命令写法。
+任务提交后的查询、控制、待决策处理和故障诊断。根据用户请求和中央最新事件选择适用操作；本页同时给出处置边界与命令写法。
 
 ## 目录
 
@@ -75,6 +75,8 @@ python3 "$MIGRATION_ROOT/scripts/mission_client.py" decide --agent-session-id "$
 - 同一条 decide 里各操作的作用范围不能重叠，scope=mission 不能和 scope=uav 同时出现。
 - 每个 `decision_id` 只能决策一次；返回 `DECISION_CLOSED` 时重新 `get`，不要重复提交。
 
+目标发现通知只报告哪架机发现什么，无需操作；终态报告各机完成情况、已找到及未找到的目标。`TARGET_ASSIGNMENT_REQUIRED` 从 `assignment_options` 选 `eligible=true` 且 `distance_m` 最小的机；无可选机则报告并保持等待。
+
 ## 结果判定
 
 | 返回 | 含义与处理 |
@@ -89,7 +91,7 @@ python3 "$MIGRATION_ROOT/scripts/mission_client.py" decide --agent-session-id "$
 
 ## 故障诊断
 
-用户问原因时，先读证据再下结论。可以给出建议，但重新起飞必须由用户明确下达新任务。
+用户只问原因时，先读证据再下结论；诊断请求不授权重新起飞，需要用户明确下达新任务。原已授权任务的异常补做按下节流程处理。
 
 ```bash
 source "$ROS_SETUP" && source "$CATKIN_SETUP" && \
@@ -104,3 +106,14 @@ python3 "$MIGRATION_ROOT/scripts/execution_history.py" --uav-id UAV-004 --task-i
 - 解锁失败要区分：`COMMAND_REJECTED`（飞控拒绝，常见原因是健康检查未过）、`SERVICE_CALL_FAILED`（服务异常）、`STATE_CONFIRM_TIMEOUT`（请求被接受但未观察到解锁）。健康检查未过时报告实际原因，不反复解锁，也不重启控制器绕过。
 - `SEGMENT_STALLED`（连续一段时间没有位移）和 `SEGMENT_TIMEOUT`（航段超时）：根据 execution 中 `timeout_evidence` 的目标、实际位置、剩余距离和规划状态判断原因，不凭距离和标称速度断定“时限太短”。
 - 执行器会话（`executor_session_id`）变化只说明控制器重启过，不代表代码版本不同；重启后旧的暂停进度失效。
+
+## 异常补做（原任务已授权）
+
+`exceptions` 出现 `WAITING_DECISION` 时，先 `get` 最新快照，再按以下流程；其余运行控制沿用原授权边界。
+
+**故障处置**（某架机出现异常）：
+1. 召回故障机：`control return`，scope=uav；该机的异常随之结束。其余机不暂停，继续原计划。返回 ACCEPTED 即可做下一步，召回是否生效看后续事件。
+2. 重新 `get` 一次，从最新快照找出故障机未完成的作业（`region_jobs` 中状态不是 SUCCEEDED 的项）和尚未找到的目标。`step_id` 是该机动作序列的步骤号，对照原任务下发的动作序列和作业顺序得到地点；对不上时不补做，报告未完成的作业。未完成的作业整区重做。
+3. 重新查询候选和计算这些未完成作业的成本，再交数值分配：候选查询的 `exclude_uavs` 排除原任务全部参与机（它们仍属于原任务）；成本和航迹的基准航高须高于原任务最高航高至少0.3米，并经航迹工具检查升限，不能在 allocate 中调整高度。
+4. 有可行方案：不出确认卡，组装动作后按 [flight-control](../SKILL.md) 中央下发流程作为新任务提交：只搜未找到的目标，`search_id` 用新的 `task_key`，`policies` 沿用原任务（`get` 快照里的 `policies`；有 `tracking_target_ids` 时只保留这次要搜的目标）。下发后按 [交付规范](../../mission-planning/references/plan-delivery.md) 报告。没有可行方案：报告这些作业未完成。
+5. 召回请求被拒绝时，如实报告阻塞，不另发新请求。

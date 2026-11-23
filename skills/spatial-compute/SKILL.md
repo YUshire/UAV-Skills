@@ -37,7 +37,7 @@ uav_runtime/.venv/bin/python uav_runtime/run.py skills/spatial-compute/scripts/c
 | `--bearing` | 是 | 方位角，正北为 0°，顺时针：北 0、东北 45、东 90、东南 135、南 180、西南 225、西 270、西北 315 |
 | `--distance` | 是 | 参考点到目标点的距离，m，须 > 0 |
 
-成功返回 `center_lon`、`center_lat`（目标点）以及回显的输入。参考点按 mission-planning 的“相对基准”确定，已有会话基准直接沿用：地点有登记区域时用区域中心 `region_center_longitude/region_center_latitude`，否则用地点坐标；单机实时位置与登记起飞点保持各自含义。所需记录由 data-query 提供。`--alt` 不用传。
+成功返回 `center_lon`、`center_lat`（目标点）以及回显的输入。参考点沿用用户或会话已明确的基准：地点有登记区域时用区域中心 `region_center_longitude/region_center_latitude`，否则用地点坐标；单机实时位置与登记起飞点保持各自含义。仅方向+距离且指定单机时使用有来源的当前位置，无法取得才询问位置或可否用登记起飞点；未指定执行机时用地点库“默认位置”。左/右/前/后须有朝向证据。所需记录由 data-query 提供。`--alt` 不用传。
 
 ## build_fuel_box.py
 

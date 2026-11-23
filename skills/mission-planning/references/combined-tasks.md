@@ -73,4 +73,6 @@ uav_runtime/.venv/bin/python uav_runtime/run.py skills/mission-planning/scripts/
 
 两段分别通过成本、分配或 dry-run，不等于组合任务通过。最后仍要检查整任务的预算、航高、可达性、顺序和动作衔接。
 
+同机先后与其他机独立并行并存时，`ordered=true` 只约束同机的步骤顺序；能力检查按实际有先后依赖的步骤链调用，不把独立并行步骤加入跨机先后链。归属与出动数量写入 `allocate.constraints`，不传给 `costs`；需跨机依赖时改用下面的任务图。
+
 跨机依赖、并行、条件分支与预留能力步骤使用新增 [任务图规划入口](task-graphs.md)。原 check_task 和原普通任务输出保持兼容；任务图的几何前段校验不代表整个条件任务可以直接下发。

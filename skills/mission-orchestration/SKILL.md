@@ -13,20 +13,6 @@ uav_runtime/.venv/bin/python uav_runtime/run.py skills/mission-orchestration/scr
 
 也可用 `--input '<JSON对象>'`，两种输入方式互斥。
 
-## 输入
-
-| 字段 | 契约 |
-|---|---|
-| `candidates` | 1..64 项；唯一 `uav_id`，正数 `range_budget`（m）与 `time_budget`（s）；其他机队元数据不参与求解 |
-| `jobs` | 1..64 项；唯一 `job_id`，可带 `name` |
-| `costs.transfer_range` | 每个候选机对应一张 `(N+1)×(N+1)` 转场距离矩阵，单位 m |
-| `costs.transfer_time` | 同样索引的转场时间矩阵，单位 s |
-| `costs.work_range` | 按 jobs 顺序给出的 N 项完整作业距离，非负数 |
-| `costs.work_time` | 同序的 N 项完整作业时间，正数 |
-| `costs.reachable` | 每个候选机对应实际可往返转场的 `job_id` 数组；按作业逐个判断，不是“保留候选即可达全部作业”。不可达作业的转场弧为 `null`，必须由该数组排除 |
-
-矩阵索引 0 是该机基地，1..N 严格对应 jobs 顺序。对角线为 0 或 null，其他有效值须为非负有限数。不可达弧可为 null，但必须由 reachable 排除；两个可执行节点之间缺成本返回 `MISSING_COST`。作业向量也接受 N+1 项格式，首项为 0 或 null。
-
 候选预算、作业和成本已有产物时，直接引用相应字段。例如已有成本产物的输入形式如下，文件路径使用本轮工具实际返回值：
 
 ```json
@@ -37,6 +23,22 @@ uav_runtime/.venv/bin/python uav_runtime/run.py skills/mission-orchestration/scr
   "constraints": {"ref": "<成本产物绝对路径>", "select": "/data/constraints"}
 }
 ```
+
+## 输入
+
+| 字段 | 契约 |
+|---|---|
+| `candidates` | 1..64 项；唯一 `uav_id`，正数 `range_budget`（m）与 `time_budget`（s）；可选正数 `planning_speed`（m/s）参与作业时间计算；其余机队元数据不参与求解 |
+| `jobs` | 1..64 项；唯一 `job_id`，可带 `name` |
+| `costs.transfer_range` | 每个候选机对应一张 `(N+1)×(N+1)` 转场距离矩阵，单位 m |
+| `costs.transfer_time` | 同样索引的转场时间矩阵，单位 s |
+| `costs.work_range` | 按 jobs 顺序给出的 N 项完整作业距离，非负数 |
+| `costs.work_time` | 同序的 N 项完整作业时间，正数 |
+| `costs.reachable` | 每个候选机对应实际可往返转场的 `job_id` 数组；按作业逐个判断，不是“保留候选即可达全部作业”。不可达作业的转场弧为 `null`，必须由该数组排除 |
+
+`planning_speed` 存在时，逐机作业时间由 `work_range / planning_speed` 计算；缺省才使用 `costs.work_time`。引用成本产物时保留完整 candidates，不裁掉此字段。
+
+矩阵索引 0 是该机基地，1..N 严格对应 jobs 顺序。对角线为 0 或 null，其他有效值须为非负有限数。不可达弧可为 null，但必须由 reachable 排除；两个可执行节点之间缺成本返回 `MISSING_COST`。作业向量也接受 N+1 项格式，首项为 0 或 null。
 
 ### 分配约束
 
@@ -71,3 +73,5 @@ groups 形式另有 `allocations_by_group` 与 `job_groups`，可按组获取归
 ## 失败
 
 `MISSING_PARAMETER` 表示缺输入；`INVALID_ARGUMENT` 表示编号、数值、索引或字段不合法；`MISSING_COST` 表示缺少所需成本；`BUDGET_MISMATCH` 表示组内外同机预算不一致；`NO_FEASIBLE_ALLOCATION` 表示给定候选、成本与约束无可行分配。`SOLVER_TIMEOUT/SOLVER_FAILED/SOLVER_UNAVAILABLE` 表示求解运行问题。报告实际状态和缺项，不把失败结果作为有效分配。
+
+仅分配失败时读 [数值分配诊断](../mission-planning/references/diagnostics.md#数值分配)，说明共担等待预算或未定位原因，保留原约束。

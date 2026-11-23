@@ -190,7 +190,7 @@ def paths_too_close(first, second):
 
 def prepare_group(requests, fleet):
     """Validate every original WGS84 plan before any publisher is created."""
-    from submit_queue_batch import validate_batch, conversion_summary, ValidationError
+    from submit_queue_batch import validate_batch, conversion_summary, ValidationError, DEFAULT_MAX_DISTANCE_M
     if not isinstance(requests, dict) or len(requests) < 2:
         raise ValueError('--fleet-json requires at least two UAV ID -> action array entries')
     plans = {}
@@ -199,12 +199,13 @@ def prepare_group(requests, fleet):
             raise ValueError('Unknown UAV ID: ' + vehicle)
         config = fleet[vehicle]
         try:
-            validated = validate_batch(batch, config['origin_lat'], config['origin_lon'])
+            validated = validate_batch(batch, config['origin_lat'], config['origin_lon'],
+                                       max_distance_m=DEFAULT_MAX_DISTANCE_M)
         except ValidationError as exc:
             raise ValueError(vehicle + ': ' + str(exc)) from None
         plans[vehicle] = {'batch': validated, 'task_id': validated[0]['task_id'],
                           'last_step_id': validated[-1]['step_id'],
-                          'conversion': conversion_summary(batch, config['origin_lat'], config['origin_lon'], 10000.)}
+                          'conversion': conversion_summary(batch, config['origin_lat'], config['origin_lon'], DEFAULT_MAX_DISTANCE_M)}
     return plans
 
 

@@ -152,6 +152,45 @@ def _grouped_costs(data, candidates, uids):
     return jobs, merged, context
 
 
+def _infeasibility_diagnosis(scenario, uids, jids):
+    """Prove a waiting lower bound only for forced pairs with a sole job."""
+    if scenario.get("required_drones") != len(uids):
+        return {}
+    eligible = scenario["eligible_uavs"]
+    violations = []
+    for job, pair in eligible.items():
+        j = int(job)
+        if (len(pair) != 2 or j in scenario["single_owner_jobs"]
+                or job in scenario["fixed_assignments"]):
+            continue
+        # shortcut: no multi-job route bounds; extend only with a proven bound.
+        if any(sum(i in ids for ids in eligible.values()) != 1 for i in pair):
+            continue
+        for i, other in (pair, pair[::-1]):
+            row, peer = scenario["uavs"][i - 1], scenario["uavs"][other - 1]
+            arrival = row["transfer_time"][0][j]
+            peer_arrival = peer["transfer_time"][0][j]
+            work = row["patrol_time_base"][j] / 2
+            wait = max(0.0, peer_arrival + scenario["epsilon"] - work - arrival)
+            minimum = arrival + wait + work + row["transfer_time"][j][0]
+            budget = row["max_endurance"]
+            if minimum > budget + 1e-6:
+                violations.append({"job_id": jids[j - 1], "uav_id": uids[i - 1],
+                                   "peer_uav_id": uids[other - 1],
+                                   "arrival_lower_bound_s": arrival,
+                                   "peer_arrival_lower_bound_s": peer_arrival,
+                                   "shared_work_time_s": work, "waiting_lower_bound_s": wait,
+                                   "return_time_s": row["transfer_time"][j][0],
+                                   "required_time_lower_bound_s": minimum,
+                                   "time_budget_s": budget, "excess_s": minimum - budget})
+    if not violations:
+        return {}
+    return {"binding_constraint": "SHARED_JOB_TIME_BUDGET",
+            "scope": "forced_pair_single_job_necessary_bound",
+            "message": "指定出动数量使这两架机必须共担唯一作业；满足作业时段重叠的等待与返航时间下界超过预算。",
+            "violations": violations}
+
+
 def compute(data):
     """仅根据数值成本与约束求解无人机任务归属和访问顺序。"""
     require(data, "input", dict)
@@ -261,7 +300,12 @@ def compute(data):
         result = solve(scenario, time_limit=time_limit)
     except SchedulerError as exc:
         code = "NO_FEASIBLE_ALLOCATION" if exc.code == "PLANNING_INFEASIBLE" else exc.code
-        raise AtomicError(code, str(exc)) from exc
+        details = {}
+        if exc.code == "PLANNING_INFEASIBLE":
+            details["diagnosis"] = _infeasibility_diagnosis(scenario, uids, jids) or {
+                "binding_constraint": "UNDETERMINED",
+                "message": "给定数值成本与约束下无可行分配，尚无可证明的具体绑定约束。"}
+        raise AtomicError(code, str(exc), **details) from exc
     except ValueError as exc:
         raise AtomicError("SOLVER_FAILED", str(exc)) from exc
     assignments = [{"uav_id": uids[row["id"]-1],

@@ -3,6 +3,8 @@ from copy import deepcopy
 import importlib.util
 import math
 from pathlib import Path
+import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -87,6 +89,45 @@ class CandidateCoordinateTests(unittest.TestCase):
         with self.assertRaises(AtomicError) as error:
             costs({"candidates": prepared["candidates"], "jobs": jobs["jobs"]})
         self.assertEqual(error.exception.code, "NO_FEASIBLE_ALLOCATION")
+
+    def test_candidate_screening_reads_a_changed_script_default(self):
+        with tempfile.TemporaryDirectory(prefix="uav-coordinate-default-") as tmp:
+            root = Path(tmp)
+            script = root / "skills/flight-control/scripts/submit_queue_batch.py"
+            script.parent.mkdir(parents=True)
+            source = (ROOT / "skills/flight-control/scripts/submit_queue_batch.py").read_text()
+            old = f"DEFAULT_MAX_DISTANCE_M = {validator.DEFAULT_MAX_DISTANCE_M!r}"
+            self.assertIn(old, source)
+            script.write_text(source.replace(old, "DEFAULT_MAX_DISTANCE_M = 20000.0", 1))
+            with patch("uav_runtime.seven_inputs.ROOT", root):
+                result = self.prepare([candidate("test-uav", 15000.0)])
+                self.assertEqual(result["_summary"]["coordinate_filter"]["max_distance_m"], 20000.0)
+                with self.assertRaises(AtomicError) as error:
+                    self.prepare([candidate("test-uav", 21000.0)])
+                self.assertEqual(error.exception.details["coordinate_filter"]["max_distance_m"], 20000.0)
+
+    def test_assembly_uses_and_reports_the_current_default(self):
+        spec = importlib.util.spec_from_file_location(
+            "_candidate_test_assembler", ROOT / "skills/flight-control/scripts/assemble_plan.py")
+        assembler = importlib.util.module_from_spec(spec)
+        with patch.dict(sys.modules, {"submit_queue_batch": validator}):
+            spec.loader.exec_module(assembler)
+        assignment = candidate("test-uav", 15000.0)
+        assignment.update(flight_alt=1.2, jobs=["J1"], estimated_range_m=30000.0,
+                          estimated_battery_after=60.0,
+                          steps=[{"type": "transit", "waypoints": [
+                              {"longitude": 120.0, "latitude": 24.0, "altitude": 1.2}]}])
+        plan = dict(status="OK", task_key="T-dynamic-limit", assignments=[assignment],
+                    mock=True, map_used=False, whole_mission_budget_complete=False,
+                    budget_scope="test", unused=[], jobs=["J1"])
+        with patch.object(validator, "DEFAULT_MAX_DISTANCE_M", 20000.0):
+            result = assembler.compute({"plan": plan})
+            self.assertEqual(result["_summary"]["max_distance_m"], 20000.0)
+            self.assertTrue(result["validated"])
+            assignment["origin"] = candidate("test-uav", 21000.0)["origin"]
+            with self.assertRaises(AtomicError) as error:
+                assembler.compute({"plan": plan})
+            self.assertEqual(error.exception.details["max_distance_m"], 20000.0)
 
 
 if __name__ == "__main__":
