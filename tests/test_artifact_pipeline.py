@@ -100,7 +100,13 @@ class OfflineCLITests(unittest.TestCase):
         self.assertFalse(result["submitted"])
         self.assertTrue(result["validated"])
         participants = result["summary"]["participants"]
-        self.assertTrue(participants[0]["actions"])
+        self.assertIsInstance(result["summary"]["show_actions"], bool)
+        if result["summary"]["show_actions"]:
+            self.assertTrue(participants[0]["actions"])
+        else:
+            self.assertNotIn("actions", participants[0])
+        saved = json.loads(Path(result["artifact_file"]).read_text())
+        self.assertTrue(saved["data"]["participants"][0]["raw_batch"])
         outputs = result["pipeline_steps"]
         costs = json.loads(Path(outputs["costs"]["artifact_file"]).read_text())
         self.assertEqual(costs["input"]["jobs"]["ref"], outputs["regions"]["artifact_file"])

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """从本次 build 产物组装原始动作、离线校验，并保存完整序列及报告。"""
 from copy import deepcopy
+import math
 import os
 from pathlib import Path
 import sys
@@ -12,8 +13,16 @@ import submit_queue_batch as batch_validator
 
 REPORT_FIELDS = ("uav_id", "flight_alt", "jobs", "battery_level", "flight_remain",
                  "range_budget", "time_budget", "estimated_range_m", "estimated_battery_after")
-SHOW_ACTIONS = True  # True 展示动作 JSON；False 不展示，仍组装、校验和保存完整动作。
+SHOW_ACTIONS = False  # True 展示动作 JSON；False 不展示，仍组装、校验和保存完整动作。
 SHOW_ACTIONS_MODE = os.environ.get("UAV_SHOW_ACTIONS", "compact").strip().lower()
+
+
+def _haversine_m(lon1, lat1, lon2, lat2):
+    r = 6371000.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp, dl = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.asin(min(1.0, math.sqrt(a)))
 
 
 def _actions_view(raw):
@@ -93,7 +102,29 @@ def compute(request):
                                 "message": str(exc), "validated": False, "submitted": False})
             continue
         report = {key: deepcopy(required(assignment, key)) for key in REPORT_FIELDS}
-        report.update(action_count=len(batch), validated=True, submitted=False)
+        report.update(
+            speed=speed,
+            origin={"longitude": origin["longitude"], "latitude": origin["latitude"]},
+            action_count=len(batch),
+            validated=True,
+            submitted=False,
+        )
+        if assignment.get("estimated_time_s") is not None:
+            report["estimated_time_s"] = assignment["estimated_time_s"]
+        job_centers = {
+            j["job_id"]: j.get("center")
+            for j in plan.get("jobs", [])
+            if isinstance(j, dict) and "job_id" in j
+        }
+        takeoff_dists = {}
+        for jid in report["jobs"]:
+            c = job_centers.get(jid)
+            if isinstance(c, (list, tuple)) and len(c) >= 2:
+                takeoff_dists[jid] = round(
+                    _haversine_m(origin["longitude"], origin["latitude"], c[0], c[1]), 1
+                )
+        if takeoff_dists:
+            report["takeoff_to_jobs_m"] = takeoff_dists
         if SHOW_ACTIONS:
             report["actions"] = deepcopy(raw) if SHOW_ACTIONS_MODE == "full" else _actions_view(raw)
             if SHOW_ACTIONS_MODE == "full":
@@ -115,7 +146,7 @@ def compute(request):
         output[key] = deepcopy(required(plan, key))
     output["_summary"] = {key: deepcopy(output[key]) for key in
                           ("task_key", "validated", "submitted", "validated_for_execution", "mock", "map_used",
-                           "whole_mission_budget_complete", "budget_scope", "max_distance_m")}
+                           "whole_mission_budget_complete", "budget_scope", "max_distance_m", "jobs")}
     output["_summary"]["participants"] = [p["report"] for p in participants]
     output["_summary"]["show_actions"] = SHOW_ACTIONS
     output["_summary"]["actions_format"] = "full" if SHOW_ACTIONS_MODE == "full" else "compact"

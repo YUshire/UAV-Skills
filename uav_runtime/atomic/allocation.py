@@ -194,7 +194,7 @@ def _infeasibility_diagnosis(scenario, uids, jids):
 def compute(data):
     """仅根据数值成本与约束求解无人机任务归属和访问顺序。"""
     require(data, "input", dict)
-    if set(data) - {"candidates", "jobs", "costs", "groups", "constraints", "solver_options"}:
+    if set(data) - {"candidates", "jobs", "costs", "groups", "constraints", "extra_constraints", "solver_options"}:
         raise AtomicError("INVALID_ARGUMENT", "分配输入含不支持的字段")
     candidates = required(data, "candidates")
     uids = _records(candidates, "uav_id", "candidates")
@@ -238,9 +238,40 @@ def compute(data):
                      "transfer_range": _matrix(distances[uid], jids, reachable, f"transfer_range.{uid}"),
                      "transfer_time": _matrix(times[uid], jids, reachable, f"transfer_time.{uid}"),
                      "patrol_range_base": list(work_range), "patrol_time_base": base_time})
-    constraints = require(data.get("constraints", {}), "constraints", dict)
+    constraints = deepcopy(require(data.get("constraints", {}), "constraints", dict))
     if set(constraints) - {"fixed_assignments", "required_drones", "single_owner_jobs", "allowed_assignments"}:
         raise AtomicError("INVALID_ARGUMENT", "constraints 含不支持的字段")
+    if "extra_constraints" in data and data["extra_constraints"] is not None:
+        extra = require(data["extra_constraints"], "extra_constraints", dict)
+        if set(extra) - {"fixed_assignments", "required_drones", "single_owner_jobs", "allowed_assignments"}:
+            raise AtomicError("INVALID_ARGUMENT", "extra_constraints 含不支持的字段")
+        if "fixed_assignments" in extra:
+            extra_fixed = require(extra["fixed_assignments"], "extra_constraints.fixed_assignments", dict)
+            base_fixed = require(constraints.setdefault("fixed_assignments", {}), "fixed_assignments", dict)
+            for jid, uid in extra_fixed.items():
+                if jid in base_fixed and base_fixed[jid] != uid:
+                    raise AtomicError("INVALID_ARGUMENT", "extra_constraints 与已有固定归属冲突", job_id=jid)
+                base_fixed[jid] = uid
+        if "single_owner_jobs" in extra:
+            extra_single = require(extra["single_owner_jobs"], "extra_constraints.single_owner_jobs", list)
+            base_single = require(constraints.setdefault("single_owner_jobs", []), "single_owner_jobs", list)
+            for jid in extra_single:
+                if jid not in base_single:
+                    base_single.append(jid)
+        if "allowed_assignments" in extra:
+            extra_allowed = require(extra["allowed_assignments"], "extra_constraints.allowed_assignments", dict)
+            base_allowed = require(constraints.setdefault("allowed_assignments", {}), "allowed_assignments", dict)
+            for jid, who in extra_allowed.items():
+                require(who, f"extra_constraints.allowed_assignments.{jid}", list)
+                if jid in base_allowed:
+                    require(base_allowed[jid], f"allowed_assignments.{jid}", list)
+                    base_allowed[jid] = [u for u in base_allowed[jid] if u in who]
+                else:
+                    base_allowed[jid] = list(who)
+        if "required_drones" in extra:
+            if "required_drones" in constraints and constraints["required_drones"] != extra["required_drones"]:
+                raise AtomicError("INVALID_ARGUMENT", "extra_constraints.required_drones 与已有约束冲突")
+            constraints["required_drones"] = extra["required_drones"]
     allowed = require(constraints.get("allowed_assignments", {}), "allowed_assignments", dict)
     for jid, allowed_uids in allowed.items():
         if not isinstance(jid, str) or jid not in jids:

@@ -5,6 +5,7 @@ remain references; route evidence only certifies the static prefix actually buil
 """
 from copy import deepcopy
 import importlib.util
+import math
 from pathlib import Path
 import sys
 
@@ -23,6 +24,108 @@ def _issue(code, message, node_id=None):
     if node_id:
         result["node_id"] = node_id
     return result
+
+
+def _haversine_m(lon1, lat1, lon2, lat2):
+    r = 6371000.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp, dl = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.asin(min(1.0, math.sqrt(a)))
+
+
+def _show_actions_flag():
+    scripts = Path(__file__).resolve().parents[1] / "skills/flight-control/scripts"
+    spec = importlib.util.spec_from_file_location("_graph_assemble_flag", scripts / "assemble_plan.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.path.insert(0, str(scripts))
+    try:
+        spec.loader.exec_module(module)
+        return bool(getattr(module, "SHOW_ACTIONS", False))
+    except Exception:
+        return False
+    finally:
+        if str(scripts) in sys.path:
+            sys.path.remove(str(scripts))
+
+
+def _compact_issue(issue):
+    out = {k: issue[k] for k in ("code", "message", "node_id") if k in issue}
+    if "max_distance_m" in issue:
+        out["max_distance_m"] = issue["max_distance_m"]
+    if "coordinate_filter" in issue and isinstance(issue["coordinate_filter"], dict):
+        out["coordinate_filter"] = issue["coordinate_filter"]
+    if "available_count" in issue:
+        out["available_count"] = issue["available_count"]
+    if "max_recorded_altitude" in issue:
+        out["max_recorded_altitude"] = issue["max_recorded_altitude"]
+    screening = issue.get("candidate_screening")
+    if isinstance(screening, dict):
+        cs = {}
+        for k in ("total_candidates", "retained_count", "reachable_count", "cost_excluded_count",
+                  "diagnosis", "reasons", "range_ok_but_time_fail"):
+            if k in screening:
+                cs[k] = screening[k]
+        if isinstance(screening.get("alternatives"), dict):
+            alt = screening["alternatives"]
+            cs["alternatives"] = {
+                "feasible_count": alt.get("feasible_count", 0),
+                "items": (alt.get("items") or [])[:5],
+            }
+        if isinstance(screening.get("altitude_alternatives"), dict):
+            aalt = screening["altitude_alternatives"]
+            cs["altitude_alternatives"] = {
+                "default_altitude_m": aalt.get("default_altitude_m"),
+                "items": (aalt.get("items") or [])[:5],
+            }
+        if cs:
+            out["candidate_screening"] = cs
+    return out
+
+
+def _scenario_summary(variant):
+    plan = variant.get("geometry_plan") or {}
+    actions = variant.get("geometry_actions")
+    budgets = {b["uav_id"]: b for b in variant.get("aircraft_budgets") or [] if isinstance(b, dict) and "uav_id" in b}
+    job_centers = {j["job_id"]: j.get("center") for j in plan.get("jobs") or [] if isinstance(j, dict) and "job_id" in j}
+    assignments = []
+    for row in plan.get("assignments") or []:
+        uid = row["uav_id"]
+        b = budgets.get(uid, {})
+        origin = row.get("origin") or {}
+        dists = {}
+        if "longitude" in origin and "latitude" in origin:
+            for jid in row.get("jobs") or []:
+                c = job_centers.get(jid)
+                if isinstance(c, (list, tuple)) and len(c) >= 2:
+                    dists[jid] = round(_haversine_m(origin["longitude"], origin["latitude"], c[0], c[1]), 1)
+        item = {
+            "uav_id": uid,
+            "flight_alt": row.get("flight_alt"),
+            "speed": row.get("speed"),
+            "jobs": row.get("jobs"),
+            "battery_level": row.get("battery_level"),
+            "range_budget_m": row.get("range_budget"),
+            "time_budget_s": row.get("time_budget"),
+            "estimated_range_m": row.get("estimated_range_m"),
+            "estimated_battery_after": row.get("estimated_battery_after"),
+            "reserved_airborne_time_s": b.get("reserved_airborne_time_s"),
+            "within_time_budget": b.get("within_time_budget"),
+        }
+        if dists:
+            item["takeoff_to_jobs_m"] = dists
+        assignments.append(item)
+    return {
+        "scenario_id": variant.get("scenario_id"),
+        "events": variant.get("events"),
+        "planning_status": variant.get("planning_status"),
+        "reserved_makespan_s": variant.get("reserved_makespan_s"),
+        "within_deadline": variant.get("within_deadline"),
+        "actions_validated": actions.get("validated") if isinstance(actions, dict) else None,
+        "assignments": assignments,
+        "violations": [_compact_issue(v) for v in variant.get("violations") or []],
+        "pending": [_compact_issue(p) for p in variant.get("pending") or []],
+    }
 
 
 def _assemble(plan):
@@ -469,5 +572,11 @@ def compute(request):
               "reply": _reply(graph, output, state, request)}
     result["_summary"] = {k: result[k] for k in ("planning_status", "submitted", "validated_for_execution",
                                                 "whole_mission_budget_complete", "reply")}
-    result["_summary"].update(node_count=len(graph["nodes"]), scenario_count=len(output))
+    result["_summary"].update(
+        node_count=len(graph["nodes"]),
+        scenario_count=len(output),
+        show_actions=_show_actions_flag(),
+        budget_scope="水平转场和覆盖/巡逻长度估计；时间按搜索时限、起降、已知等待及返航预留，未认证完整能耗与现场障碍",
+        scenarios=[_scenario_summary(v) for v in output],
+    )
     return result
