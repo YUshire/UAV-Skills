@@ -50,7 +50,7 @@ uav_runtime/.venv/bin/python uav_runtime/run.py skills/target-detection/scripts/
   --uav-id <uav_id> --query-json '<含search_id和targets的目标清单对象>'
 ```
 
-返回 `validated=true`、`submitted=false`、`perception_started=false`、`backend_verified=false`；只证明目标格式和机队记录通过，不证明类别受后端支持、识别效果、感知已启动或目标已找到。不得用试填类别推断能力；面向用户说“目标配置已检查，实际识别能力尚未验证”。
+返回 `validated=true`、`submitted=false`、`perception_started=false`、`backend_verified=false`；只证明目标格式和机队记录通过，不证明类别受后端支持、识别效果、感知已启动或目标已找到。**脚本仅做格式校验（`target_id` 1..80 位字母数字/`_`/`-`，`category` 1..100 字符非空英文词，`description` 1..2000 字符，无硬编码类别白名单）**，无需阅读 `validate_targets.py` 源码；非 COCO 常见目标（如头盔、纸箱、购物袋、火源、火炮、热源等）填最贴近的简洁英文词并在 `description` 保留完整中文，回复中如实说明“目标配置已检查，实际识别能力尚未验证”。**只对实际承担带目标搜索任务的执行机调用本脚本**，不要对纯巡逻机或无目标探索机调用。
 
 要求发现后跟踪时，按 flight-control 的离线交付规则保存目标与拟用策略，并说明跟踪尚待服务接通验证；不把目标格式校验当作跟踪能力验证。策略字段留在方案文件中，普通回复无需罗列内部字段。
 

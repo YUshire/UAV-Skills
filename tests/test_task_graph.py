@@ -75,6 +75,17 @@ class NumericPlanningTests(unittest.TestCase):
                 self.assertEqual(scenario["geometry_plan"]["assignments"][0]["flight_alt"], height)
                 self.assertFalse(result["submitted"])
                 self.assertFalse(result["whole_mission_budget_complete"])
+                summary = result["_summary"]
+                self.assertIsInstance(summary["show_actions"], bool)
+                compact = summary["scenarios"][0]
+                self.assertEqual(compact["planning_status"], scenario["planning_status"])
+                self.assertTrue(compact["actions_validated"])
+                row = compact["assignments"][0]
+                planned = scenario["geometry_plan"]["assignments"][0]
+                self.assertEqual(row["uav_id"], planned["uav_id"])
+                self.assertEqual(row["estimated_range_m"], planned["estimated_range_m"])
+                self.assertEqual(row["range_budget_m"], planned["range_budget"])
+                self.assertIn("takeoff_to_jobs_m", row)
 
     def test_aircraft_altitude_limit_still_applies(self):
         with self.assertRaises(AtomicError) as error:
@@ -151,6 +162,8 @@ class NumericPlanningTests(unittest.TestCase):
         result = compute(graph(area(action="search", search_timeout=100000)))
         self.assertEqual(result["planning_status"], "CONDITIONAL", result["reply"])
         self.assertTrue(any(p["code"] == "TIME_RESERVATION" for p in result["scenarios"][0]["pending"]))
+        self.assertTrue(any(p["code"] == "TIME_RESERVATION"
+                            for p in result["_summary"]["scenarios"][0]["pending"]))
 
     def test_dynamic_job_count_is_not_applied_to_only_the_known_prefix(self):
         b = {"id":"B","action":"search","uav_id":"UAV-254",

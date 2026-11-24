@@ -15,9 +15,9 @@
 | `id` | 唯一编号，字母开头，仅字母数字、下划线和连字符 |
 | `action` | 区域动作search/patrol；接口动作record_start、record_stop、photo、set_mode、scan、track、observe、hover、wait、report、transit、return、land |
 | `job` | 仅search/patrol。沿用resolve_jobs的地点、中心、形状、尺寸、laps、search_timeout；编号、机号及类型从节点取得 |
-| `uav_id` | 用户明确指定的执行机。几何作业可留空由原分配器选择；接口步骤仅在前置执行机唯一时继承，否则保留待明确 |
-| `params` | duration_s（正秒数）、mode、target、targets、description、until_step。未支持的字段报错，不静默忽略 |
-| `join` | 默认all：全部前置条件满足才启动；any：任一前置条件满足即可启动 |
+| `uav_id` | 用户明确指定的单架执行机。多机共担或自动选机时**省略节点层 `uav_id`**，改在顶层 `constraints` 中写 `allowed_assignments` / `required_drones`（键为节点 `id`）；接口步骤仅在前置执行机唯一时继承，否则保留待明确 |
+| `params` | 仅允许这 6 个键：`duration_s`（正秒数）、`mode`、`target`、`targets`、`description`、`until_step`（其他键会报错）。非区域接口动作（如 `transit`、`report`、`observe`、`track`、`scan`）不写 `job`，位置/地点/对象写入 `params.target` 或 `params.description` |
+| `join` | 默认 `all`：全部前置条件满足才启动；`any`：任一前置条件满足即可启动。**注意**：若显式写了 `return`/`land` 且同时依赖主搜索与 `found` 条件节点，须设 `join:"any"`，否则 `not_found`/`timeout` 分支不会触发返航；一般直接省略显式 `return`/`land`，工具默认按分支自动补返航降落 |
 
 依赖格式：`{from, to, on?}`；on默认为completed，也可为found、not_found、timeout。后三种只来自search节点，互斥，不混同。未连接的不同机步骤可并行；同机飞行步骤按稳定拓扑顺序串行，输出resource_edges说明资源顺序。这是可行的保守编排，不保证调度最优。公共几何步骤首次选定单机后，在其他结果分支固定该机；共担机组若仍无法保持一致，标记待联合分配，不声称完整条件方案已验证。
 
@@ -87,7 +87,7 @@
 4. 时间按各搜索的完整时限与几何估计取大值，并增加按max_up_speed/max_down_speed估计的起降、显式时长和等待。该数值是规划预留，不是现场完成保证。几何航程、电量仍沿用原模型，完整能耗认证保持false。
 5. 任务图的几何预览默认带原有备用返航降落段；return/land是图中结束要求，不能把预览段提前执行或与图中结束动作重复执行。
 
-顶层status=OK只表示规划器正常返回。看planning_status：PLANNED已生成、CONDITIONAL存在条件/运行时待定、NEEDS_DATA缺必要数据、INFEASIBLE有分支约束不通过、BLOCKED工具或旧动作接口阻塞。每个分支均有对应状态、violations和pending。
+顶层status=OK只表示规划器正常返回。直接读取本次返回的 `summary`（已包含 `planning_status`、`show_actions`、`reply` 以及每个分支的 `assignments`、`reserved_airborne_time_s`（含起降、搜索时限及返航）、`takeoff_to_jobs_m`、`violations`（含精简 `candidate_screening` 如 `retained_count`/备选）和 `pending`），**无需阅读 `graph_planner.py` 源码或整份拆读 80KB 大产物**。看planning_status：PLANNED已生成、CONDITIONAL存在条件/运行时待定、NEEDS_DATA缺必要数据、INFEASIBLE有分支约束不通过、BLOCKED工具或旧动作接口阻塞。每个分支的 `violations` 和 `pending`（特别是 `TIME_RESERVATION` 预留时间超预算告警）均须如实告知用户，不得隐瞒。
 
 仅搜索时限等时间预留超预算时标记CONDITIONAL，不能据此断言任务物理不可行；只有明确持续时间等必要下界已超限才作时长冲突。默认搜索时限造成不足时，缩短时限属于另算的备选，不自动改写原输入。原动作校验失败时仍保留已生成的几何航迹与分配证据，标记BLOCKED。
 

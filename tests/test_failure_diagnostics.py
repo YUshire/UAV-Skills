@@ -113,7 +113,66 @@ class AllocationDiagnosticsTests(unittest.TestCase):
         self.assertEqual(allocation._infeasibility_diagnosis(scenario, ["a", "b"], ["x", "y"]), {})
 
 
+class ExtraConstraintsTests(unittest.TestCase):
+    def test_merge_preserves_base_constraints_and_input(self):
+        request = allocation_input(100)
+        request["constraints"] = {
+            "single_owner_jobs": ["J1"],
+            "allowed_assignments": {"J1": ["early", "late"]},
+        }
+        request["extra_constraints"] = {
+            "required_drones": 1,
+            "fixed_assignments": {"J1": "late"},
+            "allowed_assignments": {"J1": ["late"]},
+            "single_owner_jobs": ["J1"],
+        }
+        original = deepcopy(request)
+        result = allocation.compute(request)
+        self.assertEqual(result["owners"]["J1"], ["late"])
+        self.assertEqual(result["constraints"], {
+            "single_owner_jobs": ["J1"],
+            "allowed_assignments": {"J1": ["late"]},
+            "required_drones": 1,
+            "fixed_assignments": {"J1": "late"},
+        })
+        self.assertEqual(request, original)
+
+    def test_conflicting_or_invalid_extras_cannot_relax_base(self):
+        cases = [
+            ({"fixed_assignments": {"J1": "early"}},
+             {"fixed_assignments": {"J1": "late"}}, "INVALID_ARGUMENT"),
+            ({"required_drones": 2}, {"required_drones": 1}, "INVALID_ARGUMENT"),
+            ({"allowed_assignments": {"J1": ["early"]}},
+             {"allowed_assignments": {"J1": ["late"]}}, "NO_FEASIBLE_ALLOCATION"),
+            ({}, {"unknown": True}, "INVALID_ARGUMENT"),
+        ]
+        for base, extra, code in cases:
+            request = allocation_input(100)
+            request.update(constraints=base, extra_constraints=extra)
+            with self.subTest(base=base, extra=extra), self.assertRaises(AtomicError) as error:
+                allocation.compute(request)
+            self.assertEqual(error.exception.code, code)
+
+
 class AssemblyDiagnosticsTests(unittest.TestCase):
+    def test_summary_exposes_job_origin_distance_and_speed_without_actions(self):
+        request = plan_input()
+        request["plan"]["jobs"] = [{"job_id": "J1", "center": [120, 24.001]}]
+        for row in request["plan"]["assignments"]:
+            row.update(speed=5, estimated_time_s=20)
+        with patch.object(assembler, "SHOW_ACTIONS", False):
+            result = assembler.compute(request)
+        summary = result["_summary"]
+        self.assertEqual(summary["jobs"], request["plan"]["jobs"])
+        self.assertFalse(summary["show_actions"])
+        for row in summary["participants"]:
+            self.assertEqual(row["origin"], {"longitude": 120, "latitude": 24})
+            self.assertAlmostEqual(row["takeoff_to_jobs_m"]["J1"], 111.2, places=1)
+            self.assertEqual(row["speed"], 5)
+            self.assertEqual(row["estimated_time_s"], 20)
+            self.assertNotIn("actions", row)
+        self.assertTrue(result["participants"][0]["raw_batch"])
+
     def test_real_pipeline_stops_and_creates_no_artifact_on_partial_failure(self):
         request = plan_input()
         request["plan"]["assignments"][0]["origin"]["latitude"] = 23

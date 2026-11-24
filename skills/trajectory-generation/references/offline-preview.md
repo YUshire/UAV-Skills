@@ -41,7 +41,7 @@ uav_runtime/.venv/bin/python uav_runtime/run.py skills/trajectory-generation/scr
 
 ## 地图能力
 
-本地离线入口没有 `query-map`。`semantic_map.py` 是外部语义地图入口，需要部署 `uav_runtime.map_provider` 及其地图资源；缺失时返回 `ENVIRONMENT_ERROR` 和具体组件名。只有环境检查确认外部语义地图可用时才使用该入口。
+本地离线入口没有 `query-map`。`semantic_map.py` 是外部语义地图入口，需要部署 `uav_runtime.map_provider` 及其地图资源；缺失时返回 `ENVIRONMENT_ERROR` 和具体组件名。只有已部署外部语义地图时才使用该入口。
 
 ## 异常
 

@@ -4,9 +4,9 @@
 
 顶层为 `steps` 数组，每步包含唯一 `id`、脚本相对路径 `script`、该脚本原有的 `input`。支持 prepare_candidates、resolve_jobs、planning_routes、allocate、assemble_plan 五个原数值脚本，按数组顺序执行。单步命令不变，不包括在线下发。
 
-字段引用写为 `{"ref_step":"上游步骤id","select":"/data/字段"}`，只能引用本次前面成功的步骤；省略 select 时取 `/data`。程序从上游返回 JSON 读取实际 `artifact_file`，转成原有 ref/select，不搜索目录、不选择旧文件。原有明确的 ref/select 仍可用于本次已获得的输入产物。
+字段引用写为 `{"ref_step":"上游步骤id","select":"/data/字段"}`，只能引用本次前面成功的步骤；省略 select 时取 `/data`。程序从上游返回 JSON 读取实际 `artifact_file`，转成原有 ref/select，不搜索目录、不选择旧文件。原有明确的 ref/select 仍可用于本次已获得的输入产物。`allocate` 步骤在引用 `costs` 约束的同时需要叠加用户额外约束（如 `allowed_assignments`、`required_drones`、`fixed_assignments`、`single_owner_jobs`）时，直接写入同级字段 `"extra_constraints": {...}`，由工具自动合并，无需拆分 pipeline 或翻看源码。`resolve_jobs` 的每项作业仅接收字段：`job_id, name, place, center_lon, center_lat, shape, radius, length, width, task_type, laps, search_timeout, uav_id`。
 
-以下示例输入已明确的区域，选择指定机，串联到完整动作；区域、机号、航高和约束均按用户任务填写，不照搬示例值。机况等参数仍按各技能核对，执行请求仍先做环境检查。
+以下示例输入已明确的区域，选择指定机，串联到完整动作；区域、机号、航高和约束均按用户任务填写，不照搬示例值。机况等参数仍按各技能核对。
 
 ```json
 {
