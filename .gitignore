@@ -7,3 +7,10 @@ __pycache__/
 nanobot-workspace.fragment.json
 
 docs/
+nanobot-source/.venv/
+nanobot-source/.pytest_cache/
+runtime-config/local.json
+chat_with_bot/*.jsonl
+chat_with_bot/generation-check-*/
+
+/memory/

@@ -182,7 +182,7 @@ def query_area(args):
     distance = horizontal_length(waypoints)
     if distance == 0:
         raise ValueError("area is too small for distinct geographic waypoints")
-    return dict(result, waypoints=waypoints, path_length=round(distance, 3))
+    return dict(result, path_length=round(distance, 3), waypoint_count=len(waypoints), waypoints=waypoints)
 
 
 def add_arguments(parser):

@@ -52,6 +52,7 @@ def compute(request):
         known[step["id"]] = {"artifact_file": ""}
 
     outputs, completed = {}, {}
+    last_ok_step, last_ok_summary = None, None
     for step in steps:
         sid = step["id"]
         value = bind(step["input"], outputs)
@@ -69,13 +70,25 @@ def compute(request):
                               returncode=process.returncode, detail=str(exc),
                               stderr=process.stderr[-2000:]) from exc
         if process.returncode != 0 or result.get("status") != "OK":
-            return {**result, "status": result.get("status") if result.get("status") not in (None, "OK")
-                    else "PIPELINE_STEP_FAILED", "failed_step": sid, "pipeline_steps": completed}
+            failure_payload = {
+                **result,
+                "status": result.get("status") if result.get("status") not in (None, "OK")
+                else "PIPELINE_STEP_FAILED",
+                "failed_step": sid,
+                "pipeline_steps": completed,
+            }
+            if last_ok_summary is not None:
+                failure_payload["last_ok_step"] = last_ok_step
+                failure_payload["last_ok_summary"] = last_ok_summary
+            return failure_payload
         if result.get("artifact_created") is not True or not isinstance(result.get("artifact_file"), str):
             raise AtomicError("PIPELINE_STEP_FAILED", "成功步骤未返回产物路径",
                               failed_step=sid, pipeline_steps=completed)
         outputs[sid] = result
         completed[sid] = {key: result[key] for key in ("status", "kind", "artifact_file") if key in result}
+        if "summary" in result:
+            last_ok_step = sid
+            last_ok_summary = result["summary"]
     return {**result, "pipeline_steps": completed}
 
 

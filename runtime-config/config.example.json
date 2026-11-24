@@ -1,0 +1,81 @@
+{
+  "agents": {
+    "defaults": {
+      "model": "Qwen3.8-27B",
+      "provider": "vllm",
+      "maxTokens": 8192,
+      "contextWindowTokens": 64000,
+      "contextBlockLimit": null,
+      "temperature": 0.1,
+      "presencePenalty": 0.5,
+      "maxToolIterations": 200,
+      "maxToolResultChars": 10000,
+      "providerRetryMode": "standard",
+      "reasoningEffort": null,
+      "timezone": "UTC",
+      "unifiedSession": false,
+      "disabledSkills": [
+        "clawhub",
+        "github",
+        "summarize",
+        "cron",
+        "weather",
+        "tmux"
+      ],
+      "idleCompactAfterMinutes": 0,
+      "dream": {
+        "intervalH": 2,
+        "modelOverride": null,
+        "maxBatchSize": 20,
+        "maxIterations": 10
+      },
+      "workspace": "."
+    }
+  },
+  "providers": {
+    "vllm": {
+      "apiBase": "http://127.0.0.1:7696/v1",
+      "apiKey": "EMPTY"
+    }
+  },
+  "tools": {
+    "exec": {
+      "enable": true,
+      "timeout": 180,
+      "pathAppend": "",
+      "sandbox": "",
+      "allowedEnvKeys": [],
+      "tmpdir": ""
+    },
+    "web": {
+      "enable": false
+    },
+    "spawn": {
+      "enable": true
+    },
+    "message": {
+      "enable": false
+    },
+    "cron": {
+      "enable": false
+    },
+    "my": {
+      "enable": false
+    },
+    "notebookEdit": {
+      "enable": false
+    },
+    "listDir": {
+      "enable": false
+    },
+    "glob": {
+      "enable": false
+    },
+    "grep": {
+      "enable": false
+    },
+    "restrictToWorkspace": false,
+    "mcpServers": {},
+    "ssrfWhitelist": []
+  }
+}

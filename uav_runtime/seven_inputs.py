@@ -172,16 +172,61 @@ def prepare_candidates(data):
                               coordinate_filter=coordinate_filter, excluded=excluded,
                               available_candidates=in_range, available_count=len(in_range))
         candidates = in_range
+    candidates_top, reachable_lb_count = _candidate_briefs(candidates, center)
     return {'candidates': candidates, 'excluded': excluded, 'flight_alt': altitude,
             'reserve_battery_percent': selected['reserve_battery_percent'],
             'source': 'configured_readonly_snapshot', 'submitted': False,
             '_summary': {'candidate_count': len(candidates),
                          'excluded_count': len(excluded),
+                         'reachable_lb_count': reachable_lb_count,
+                         'candidates_top': candidates_top,
                          'bbox_input_count': bbox_input_count if spatial_filter else None,
                          'circle_excluded_count': circle_excluded,
                          'coordinate_filter': coordinate_filter,
                          'flight_alt': altitude,
                          'spatial_filter': spatial_filter}}
+
+
+def _candidate_briefs(candidates, center, limit=15):
+    """Build compact, reachability-ranked candidate summaries to avoid large artifact reads."""
+    items = []
+    for row in candidates:
+        origin = row.get('origin') or {}
+        rb = row.get('range_budget')
+        tb = row.get('time_budget')
+        mfr = row.get('max_flight_radius')
+        brief = {
+            'uav_id': row['uav_id'],
+            'payload': row.get('payload_status'),
+            'max_endurance_min': row.get('max_endurance'),
+            'battery_pct': row.get('battery_level'),
+            'max_flight_radius_m': mfr,
+            'range_budget_m': round(rb, 1) if isinstance(rb, (int, float)) else rb,
+            'time_budget_s': round(tb, 1) if isinstance(tb, (int, float)) else tb,
+        }
+        if center is not None and 'longitude' in origin and 'latitude' in origin:
+            dist = direct_route((origin['longitude'], origin['latitude']),
+                                (center[0], center[1]), 1.0, points=0)['one_way_distance']
+            radius_ok = (mfr is None) or (dist <= mfr + 1e-6)
+            range_ok = isinstance(rb, (int, float)) and (2.0 * dist <= rb + 1e-6)
+            brief['dist_m'] = round(dist, 1)
+            brief['radius_ok'] = radius_ok
+            brief['range_ok'] = range_ok
+            brief['reachable_lb'] = radius_ok and range_ok
+            brief['origin'] = [round(origin['longitude'], 6), round(origin['latitude'], 6)]
+        else:
+            if 'longitude' in origin and 'latitude' in origin:
+                brief['origin'] = [round(origin['longitude'], 6), round(origin['latitude'], 6)]
+        items.append(brief)
+    if center is not None:
+        items.sort(key=lambda x: (not x.get('reachable_lb', False),
+                                  x.get('dist_m', float('inf')),
+                                  -(x.get('max_endurance_min') or 0)))
+        reachable_lb_count = sum(1 for x in items if x.get('reachable_lb'))
+    else:
+        items.sort(key=lambda x: -(x.get('range_budget_m') or 0))
+        reachable_lb_count = None
+    return items[:limit], reachable_lb_count
 
 
 def resolve_jobs(data):
