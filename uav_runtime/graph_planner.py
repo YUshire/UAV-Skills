@@ -5,6 +5,7 @@ remain references; route evidence only certifies the static prefix actually buil
 """
 from copy import deepcopy
 import importlib.util
+import json
 import math
 from pathlib import Path
 import sys
@@ -62,7 +63,8 @@ def _compact_issue(issue):
     screening = issue.get("candidate_screening")
     if isinstance(screening, dict):
         cs = {}
-        for k in ("total_candidates", "retained_count", "reachable_count", "cost_excluded_count",
+        for k in ("input_count", "total_candidates", "retained_count", "retained_uav_ids",
+                  "reachable_count", "cost_excluded_count",
                   "diagnosis", "reasons", "range_ok_but_time_fail"):
             if k in screening:
                 cs[k] = screening[k]
@@ -119,6 +121,7 @@ def _scenario_summary(variant):
         "scenario_id": variant.get("scenario_id"),
         "events": variant.get("events"),
         "planning_status": variant.get("planning_status"),
+        "task_key": plan.get("task_key"),
         "reserved_makespan_s": variant.get("reserved_makespan_s"),
         "within_deadline": variant.get("within_deadline"),
         "actions_validated": actions.get("validated") if isinstance(actions, dict) else None,
@@ -126,6 +129,26 @@ def _scenario_summary(variant):
         "violations": [_compact_issue(v) for v in variant.get("violations") or []],
         "pending": [_compact_issue(p) for p in variant.get("pending") or []],
     }
+
+
+def _compact_scenarios(variants):
+    """Compact multi-branch summaries to stay under tool-result size limits."""
+    items = [_scenario_summary(v) for v in variants]
+    if len(items) <= 3:
+        return items
+    seen = {field: {} for field in ("assignments", "violations", "pending")}
+    for item in items:
+        for field in ("assignments", "violations", "pending"):
+            val = item.get(field)
+            if not val:
+                continue
+            sig = json.dumps(val, ensure_ascii=False, sort_keys=True)
+            if sig in seen[field]:
+                item[f"same_{field}_as"] = seen[field][sig]
+                item.pop(field, None)
+            else:
+                seen[field][sig] = item["scenario_id"]
+    return items
 
 
 def _assemble(plan):
@@ -570,13 +593,16 @@ def compute(request):
                                      "flatten_to_legacy_queue": False,
                                      "unbounded_loops_allowed": False},
               "reply": _reply(graph, output, state, request)}
+    scenarios_summary = _compact_scenarios(output)
+    task_keys = sorted({s["task_key"] for s in scenarios_summary if s.get("task_key")})
     result["_summary"] = {k: result[k] for k in ("planning_status", "submitted", "validated_for_execution",
                                                 "whole_mission_budget_complete", "reply")}
     result["_summary"].update(
         node_count=len(graph["nodes"]),
         scenario_count=len(output),
         show_actions=_show_actions_flag(),
+        task_keys=task_keys,
         budget_scope="水平转场和覆盖/巡逻长度估计；时间按搜索时限、起降、已知等待及返航预留，未认证完整能耗与现场障碍",
-        scenarios=[_scenario_summary(v) for v in output],
+        scenarios=scenarios_summary,
     )
     return result

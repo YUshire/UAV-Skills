@@ -1,71 +1,36 @@
 ---
 name: spatial-compute
-description: 地理空间换算：计算相对位置、将已查询的地点记录与用户范围整理为作业区域，以及生成圆形或矩形区域的FUEL搜索框。
+description: 【空间换算】负责：相对方位距离偏移（calc_offset）、单项区域整理（resolve_jobs）与 FUEL 搜索框计算（build_fuel_box）。不负责：查库、航迹与完整规划（普通完整任务的无偏移作业已在 artifact-pipeline 内给出 Schema，无需另读本技能）。
 ---
 
-# 空间计算
+# 空间计算（唯一空间换算权威源）
 
-## 可用函数
+所有坐标为 WGS84 经纬度，距离、尺寸、高度单位为米；返回值直接使用，**不手算、不取整**。
 
-| 函数 | 用途 |
-|---|---|
-| `calc_offset.py` | 参考点 + 方位角 + 距离 → 目标点经纬度 |
-| `build_fuel_box.py` | 区域中心 + 形状尺寸 + 航高 → FUEL 搜索框 `box_min`、`box_max` |
-| `resolve_jobs.py` | 已查询地点记录 + 用户明确范围 → 数值作业区域 |
-
-空间单项可独立计算。完整任务的最终航迹包含按实际分区生成的搜索框；数值分配本身不生成搜索框。
-
-## resolve_jobs.py
-
-按 AGENTS.md 的 JSON 调用方式，输入 `{jobs:[...],places:[...]}`。`places` 是地点查询返回的真实记录数组；全部作业已给中心坐标时可省略。脚本不查库、不猜地名或范围。
-
-每个作业使用原格式：`{place:"教学楼"}`，或 `{center_lon:...,center_lat:...,shape:"rectangle",length:...,width:...}`。可加 `job_id`、`name`；用户指定某机负责时加 `uav_id`。地名作业的用户形状、尺寸、中心覆盖相应登记字段；圆形必须给 `radius`。只有登记点且用户未给范围时返回缺参数，不能把偏移距离当半径。
-
-返回 `jobs`，含 `job_id/name/center/entrance/shape/尺寸/fixed_uav/area_source`。区域中心与入口分别保留；有登记区域时取其中心，用户为登记点明确给出范围时以该点为中心。未找到、同名多记录、缺尺寸或不完整坐标分别返回 `NOT_FOUND`、`AMBIGUOUS`、`MISSING_PARAMETER`，非法数值返回 `INVALID_ARGUMENT`。这些结果只说明所提供记录与参数能否构成区域，不认证用户意图。
-
-## calc_offset.py
-
+## 1. 相对位置偏移（`calc_offset.py`）
 ```bash
 uav_runtime/.venv/bin/python uav_runtime/run.py skills/spatial-compute/scripts/calc_offset.py \
-  --lon <参考点经度> --lat <参考点纬度> --bearing <方位角> --distance <距离>
+  --lon <参考点经度> --lat <参考点纬度> --bearing <方位角> --distance <距离m>
 ```
+- `--bearing`（顺时针，正北 0°）：北 `0`、东北 `45`、东 `90`、东南 `135`、南 `180`、西南 `225`、西 `270`、西北 `315`。`--distance > 0`，`--alt` 不传。
+- **相对基准规则**：
+  1. 地点基准：有登记区域时取 `region_center_longitude`/`region_center_latitude`，否则取地点入口 `longitude`/`latitude`；
+  2. 仅方向+距离且指定单架执行机：需该机有来源的当前位置（状态库起飞点不能冒充实时位置，除非用户/会话已明确沿用起飞点，否则询问）；未指定执行机时查地点库“默认位置”；
+  3. 左/右/前/后须有朝向证据，否则询问（禁止将“左前方”固定当西北）。
+- **注意**：偏移距离 ≠ 区域半径或长宽，严禁混用。
 
-| 参数 | 必填 | 说明 |
-|---|:---:|---|
-| `--lon`、`--lat` | 是 | 参考点经纬度（WGS84） |
-| `--alt` | 否 | 参考点海拔，默认 0 m |
-| `--bearing` | 是 | 方位角，正北为 0°，顺时针：北 0、东北 45、东 90、东南 135、南 180、西南 225、西 270、西北 315 |
-| `--distance` | 是 | 参考点到目标点的距离，m，须 > 0 |
+## 2. 区域整理（`resolve_jobs.py`）
+通过 `run.py skills/spatial-compute/scripts/resolve_jobs.py --input '<JSON>'` 调用，输入 `{"jobs":[...], "places":[...]}`：
+- **地名作业**：`{"job_id":"J1","place":"教学楼"}`（用户给定范围时加 `shape` 与尺寸覆盖登记区），同级**必填** `places`（`query_location.py` 返回的 `data` 原数组）。
+- **坐标作业**：`{"job_id":"J1","name":"区域1","center_lon":...,"center_lat":...,"shape":"circle","radius":10}` 或 `shape:"rectangle","length":东西长,"width":南北宽`。全部为坐标作业时可省略 `places`。
+- 可选字段：`uav_id`、`task_type`（`search`/`patrol`）、`laps`、`search_timeout`。仅登记点位且用户未给范围时返回 `MISSING_PARAMETER`，须询问形状与尺寸。
 
-成功返回 `center_lon`、`center_lat`（目标点）以及回显的输入。参考点沿用用户或会话已明确的基准：地点有登记区域时用区域中心 `region_center_longitude/region_center_latitude`，否则用地点坐标；单机实时位置与登记起飞点保持各自含义。仅方向+距离且指定单机时使用有来源的当前位置，无法取得才询问位置或可否用登记起飞点；未指定执行机时用地点库“默认位置”。左/右/前/后须有朝向证据。所需记录由 data-query 提供。`--alt` 不用传。
-
-## build_fuel_box.py
-
+## 3. FUEL 搜索框（`build_fuel_box.py`，仅单项请求用）
 ```bash
 uav_runtime/.venv/bin/python uav_runtime/run.py skills/spatial-compute/scripts/build_fuel_box.py \
-  --center-lon <中心经度> --center-lat <中心纬度> --shape rectangle --length <东西长> --width <南北宽> --flight-alt <航高>
+  --center-lon <经度> --center-lat <纬度> --shape rectangle --length <东西长> --width <南北宽> --flight-alt <航高>
 ```
-
-| 参数 | 必填 | 说明 |
-|---|:---:|---|
-| `--center-lon`、`--center-lat` | 是 | 区域中心 |
-| `--shape` | 是 | `circle` 或 `rectangle` |
-| `--radius` | 圆形必填 | 半径，m |
-| `--length`、`--width` | 矩形必填 | 东西长、南北宽，m |
-| `--flight-alt` | 是 | 任务航高，m，须 > 0.3 |
-
-返回 `box_min=[西经度,南纬度,0.3]`、`box_max=[东经度,北纬度,航高+0.5]`。圆形区域返回外接正方形。
+圆形用 `--shape circle --radius <半径>`（返回外接正方形）；`--flight-alt > 0.3`。
 
 ## 异常
-
-| 状态 | 处理 |
-|---|---|
-| `MISSING_PARAMETER` | 先从用户原话、上下文、对应数据库和本技能默认值补齐；仍缺计算必需字段时，再一次询问具体缺项 |
-| `INVALID_ARGUMENT` | 检查经纬度范围、正数约束和形状对应的尺寸参数，修正后最多重试一次 |
-| `ERROR` | 停止，报告错误，不自行计算坐标或边界 |
-
-## 注意事项
-
-- 坐标为 WGS84 经纬度；距离、尺寸、高度单位为米。
-- 参考点到目标点的距离不是区域尺寸，不能拿来当半径或长宽。
-- 函数返回值直接使用，不重算、不取整。
+`MISSING_PARAMETER` 先从上下文/库补齐，仍缺则询问；`INVALID_ARGUMENT` 检查范围与正数约束重试 1 次；`ERROR` 停止并报告。

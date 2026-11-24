@@ -556,7 +556,9 @@ def _screen_candidates(prepared, routes, work_range):
                for item in ordered[:_SCREENING_NEAREST_LIMIT]]
     screening = {"method": "area_round_trip_lower_bound",
                  "input_count": len(prepared["candidates"]),
-                 "retained_count": len(retained), "excluded_count": len(excluded),
+                 "retained_count": len(retained),
+                 "retained_uav_ids": [u["uav_id"] for u in retained[:15]],
+                 "excluded_count": len(excluded),
                  "assumed_transit_speed_mps": min_planning,
                  "transit_speed_mps": min_planning,
                  "work_speed_mps": max_planning,
