@@ -6,7 +6,9 @@
 
 当前 `AGENTS.md` 静态提示设为 `MODE = PLANNING_ONLY`，规划检查后交付，不调用环境自检或在线提交。该模式是智能体提示约定，不是 `run.py` 新增的执行参数。
 
-编号“改动／原因／影响”、Gemini 工作记录与本次验证见 [本次同步说明](reviews/20261124-runtime-skills-sync.md)。
+智能体实际运行代码也已纳入：`nanobot-source/` 提供当前框架，`runtime-config/` 提供脱敏配置与启动说明，`chat_with_bot/` 提供单条、批量和轨迹分析入口。
+
+安装及运行见 [运行说明](runtime-config/README.md)；编号“改动／原因／影响”、Gemini 工作记录与本次验证见 [本次同步说明](reviews/20261124-runtime-skills-sync.md)。
 
 ## 2026-11-24 更新
 
