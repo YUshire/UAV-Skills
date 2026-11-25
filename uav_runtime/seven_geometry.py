@@ -53,6 +53,9 @@ def _prepared(request, candidate_limit=64):
     ordered = request.get("ordered", False)
     if type(ordered) is not bool:
         raise AtomicError("INVALID_ARGUMENT", "ordered 须为布尔值")
+    return_to_home = request.get("return_to_home", True)
+    if type(return_to_home) is not bool:
+        raise AtomicError("INVALID_ARGUMENT", "return_to_home 须为布尔值")
     speed = request.get("speed")
     if speed is not None:
         speed = finite(speed, "speed", True)
@@ -145,6 +148,7 @@ def _prepared(request, candidate_limit=64):
     planning_speeds = [candidate["planning_speed"] for candidate in candidates]
     return {"candidates": candidates, "jobs": jobs, "task_type": task_type,
             "flight_alt": altitude, "laps": laps, "ordered": ordered,
+            "return_to_home": return_to_home,
             "speeds": {"transit": min(planning_speeds), "work": max(planning_speeds)},
             "requested_speed": speed}
 
@@ -307,11 +311,12 @@ def _speed_alternatives(prepared, routes, work_range, plausible, skip_ids):
         for index, job in enumerate(prepared["jobs"]):
             waypoints = routes[index]["waypoints"]
             start, end = waypoints[0], waypoints[-1]
-            transit = (
-                direct_route(home, (start["longitude"], start["latitude"]),
-                             prepared["flight_alt"], points=0)["one_way_distance"]
-                + direct_route((end["longitude"], end["latitude"]), home,
-                               prepared["flight_alt"], points=0)["one_way_distance"])
+            outbound = direct_route(home, (start["longitude"], start["latitude"]),
+                                    prepared["flight_alt"], points=0)["one_way_distance"]
+            back = (direct_route((end["longitude"], end["latitude"]), home,
+                                 prepared["flight_alt"], points=0)["one_way_distance"]
+                    if prepared.get("return_to_home", True) else 0.0)
+            transit = outbound + back
             total = transit + work_range[index]
             distance = direct_route(home, job["center"], prepared["flight_alt"],
                                     points=0)["one_way_distance"]
@@ -492,7 +497,8 @@ def _screen_candidates(prepared, routes, work_range):
             farthest = distance + radius
             radius_ok = radius_limit is None or farthest <= radius_limit + 1e-6
             # direct_route rounds to millimetres; bias downward to preserve a lower bound.
-            lower = 2 * max(0.0, distance - radius - 0.001)
+            leg_factor = 2 if prepared.get("return_to_home", True) else 1
+            lower = leg_factor * max(0.0, distance - radius - 0.001)
             bound = {"job_id": job["job_id"], "distance_m": distance,
                      "farthest_m": farthest, "max_flight_radius_m": radius_limit,
                      "radius_ok": radius_ok,
@@ -605,7 +611,7 @@ def _screen_candidates(prepared, routes, work_range):
 
 def costs(request):
     """Calculate numerical allocation costs from supplied aircraft and regions."""
-    if set(request) - {"operation", "candidates", "jobs", "task_type", "flight_alt", "laps", "speed", "ordered"}:
+    if set(request) - {"operation", "candidates", "jobs", "task_type", "flight_alt", "laps", "speed", "ordered", "return_to_home"}:
         raise AtomicError("INVALID_ARGUMENT", "costs 输入含不支持字段")
     prepared = _prepared(request, candidate_limit=4096)
     routes = [region_route(job, prepared["flight_alt"], job["task_type"],
@@ -877,14 +883,17 @@ def build(request):
         row["owners"] = list(allocation["owners"][job["job_id"]])
         report_jobs.append(row)
     task_types = sorted({job["task_type"] for job in prepared["jobs"]})
+    rth = prepared.get("return_to_home", True)
+    budget_scope = ("水平转场和覆盖/巡逻长度估计；不含起降、搜索超时上界或跟踪占用" if rth
+                    else "单程水平转场和覆盖/巡逻长度估计（不返航，结束后原地悬停）；不含起降与搜索超时上界")
     output = {"status": "OK", "submitted": False, "task_key": "T" + time.strftime("%m%d%H%M%S") + uuid.uuid4().hex[:4],
               "task_type": task_types[0] if len(task_types) == 1 else "mixed",
               "task_types": task_types, "flight_alt": prepared["flight_alt"], "laps": prepared["laps"],
-              "ordered": prepared["ordered"],
+              "ordered": prepared["ordered"], "return_to_home": rth,
               "speed": prepared.get("requested_speed"), "speeds": prepared["speeds"], "search_timeout": timeout,
               "candidates": [u["uav_id"] for u in prepared["candidates"]], "jobs": report_jobs,
               "assignments": assignments, "unused": deepcopy(allocation["unused"]), "solver": deepcopy(allocation["solver"]),
-              "allocation_check": check, "budget_scope": "水平转场和覆盖/巡逻长度估计；不含起降、搜索超时上界或跟踪占用",
+              "allocation_check": check, "budget_scope": budget_scope,
               "whole_mission_budget_complete": False}
     output["_summary"] = {"task_key": output["task_key"], "task_type": output["task_type"],
                           "task_types": output["task_types"], "ordered": output["ordered"],
