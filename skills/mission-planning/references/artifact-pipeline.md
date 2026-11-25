@@ -17,6 +17,7 @@
    - **仅当 `assemble_plan` 校验通过（`artifact_created=true`）**且非单纯可行性咨询时，按 [plan-delivery.md](plan-delivery.md) 将交付请求 JSON 写入 `artifacts/requests/delivery_<task_key>.json`；若 `assemble_plan` 整体失败，禁止写完整交付请求 JSON，严禁修改上游 `build` 产物跑子集。
 4. **按模板交付**：
    - 直接使用 `summary`（已含 `task_key`、`jobs`、`participants`、`speed`、`takeoff_to_jobs_m`、`show_actions`、`budget_scope`、`max_distance_m`），按 [plan-delivery.md](plan-delivery.md) 输出日常中文回复；当前 `PLANNING_ONLY` 模式**不读** `online-submission.md`、**不调** `mission_client.py`（仅 `ONLINE_EXEC` 模式再进入中央下发）。
+   - **必展动作序列**：只要 `assemble_plan` 校验通过并产出可下发动作序列（`summary.participants[*].actions` 存在且 `summary.show_actions` 不为 `false`），最终回复**必须**用合法 ` ```json ` 代码块逐机完整展示动作序列，严禁遗漏或仅用文字概括。
 
 ## `--pipeline` 完整模板（标准 6 步合法 JSON）
 

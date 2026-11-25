@@ -18,7 +18,7 @@ uav_runtime/.venv/bin/python uav_runtime/run.py skills/flight-control/scripts/as
   --input '{"plan":{"ref":"<build实际返回的artifact_file>","select":"/data"}}'
 ```
 - 仅组装与离线格式/坐标转换校验（`submitted=false`）。返回的 `summary` 已包含 `task_key`、`jobs`、`participants`（含 `speed`、`origin`、`takeoff_to_jobs_m`、预计航程与剩余电量）、`show_actions`、`budget_scope`、`max_distance_m`。
-- 动作展示开关由脚本顶部 `SHOW_ACTIONS` 控制，交付时严格遵守 `summary.show_actions`（细则见 `mission-planning/references/plan-delivery.md`）。
+- 动作展示开关由脚本顶部 `SHOW_ACTIONS` 控制（当前默认 `True`）；**只要产出可下发动作序列且 `summary.show_actions` 为 `true`，最终回复必须用合法 JSON 代码块逐机展示动作序列**（细则见 `mission-planning/references/plan-delivery.md`）。
 
 ## 航高、结束策略与安全边界
 - **定高边界**：`fuel_explore` 的 `box_min[2]`/`box_max[2]` 是搜索空间上下界而非全程定高参数；用户明确要求定高时，保留几何方案并说明搜索阶段定高尚未验证，不手改搜索框。

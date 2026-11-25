@@ -13,7 +13,7 @@ import submit_queue_batch as batch_validator
 
 REPORT_FIELDS = ("uav_id", "flight_alt", "jobs", "battery_level", "flight_remain",
                  "range_budget", "time_budget", "estimated_range_m", "estimated_battery_after")
-SHOW_ACTIONS = False  # True 展示动作 JSON；False 不展示，仍组装、校验和保存完整动作。
+SHOW_ACTIONS = True  # True 展示动作 JSON；False 不展示，仍组装、校验和保存完整动作。
 SHOW_ACTIONS_MODE = os.environ.get("UAV_SHOW_ACTIONS", "compact").strip().lower()
 
 

@@ -18,7 +18,7 @@
    - **扫描对象（战壕/道路）放在 `scan` 节点，绝不塞进 `targets`。**
 4. **按 `summary` 交付（无需拆产物）**：
    - `summary` 已包含 `planning_status`、`show_actions`、`task_keys`、`budget_scope`、`reply` 以及去重后的 `scenarios`（含各分支 `task_key`、`assignments`、`reserved_airborne_time_s`、`takeoff_to_jobs_m`、`violations`、`pending`）。
-   - 按 [plan-delivery.md](plan-delivery.md) 用日常中文逐项说明执行机、区域/对象、先后/并行、触发条件、时长（缺则标待补）、结束动作、全部 `violations`/`pending` 告警及未下发/未验证边界；保留原图请求文件作为意图记录。
+   - 按 [plan-delivery.md](plan-delivery.md) 用日常中文逐项说明执行机、区域/对象、先后/并行、触发条件、时长（缺则标待补）、结束动作、全部 `violations`/`pending` 告警及未下发/未验证边界；**但凡生成了规划（非 `INFEASIBLE`/`BLOCKED`），`summary.scenarios[*].assignments[*].actions` 已按机组装好动作 JSON，回复中必须用合法 ` ```json ` 代码块逐机完整展示，严禁遗漏**；保留原图请求文件作为意图记录。
 
 ## 输入 Schema 速查（一次写对，禁止试错）
 
