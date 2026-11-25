@@ -4,16 +4,21 @@ Conditional graphs are not flattened into a queue_batch. Unknown target location
 remain references; route evidence only certifies the static prefix actually built.
 """
 from copy import deepcopy
+from datetime import datetime
 import importlib.util
 import json
 import math
 from pathlib import Path
+import re
 import sys
 
 from .atomic.common import AtomicError, finite, require
 from .atomic.query import compute as query
 from .atomic.allocation import compute as allocate
+from .direct_path import direct_route
 from .mission import constraints_for
+from .mission_models import digest
+from .planning_geometry import lon_lat, region_route, search_box
 from .seven_inputs import prepare_candidates, resolve_jobs
 from .seven_geometry import costs, build
 from .task_graph import (validate, scenarios, bind, references, GEOMETRY_ACTIONS,
@@ -85,14 +90,217 @@ def _compact_issue(issue):
     return out
 
 
+def _compact_waypoints(waypoints):
+    return {
+        "count": len(waypoints),
+        "first": waypoints[0] if waypoints else None,
+        "last": waypoints[-1] if waypoints else None,
+    }
+
+
+def _resolve_transit_dest(node, places):
+    """Extract (lon, lat) for a transit node from params text or geo_library."""
+    params = node.get("params") or {}
+    texts = [str(params.get(k) or "") for k in ("description", "target")]
+    for text in texts:
+        m = re.search(r"(-?\d{1,3}\.\d+)\s*[,，]\s*(-?\d{1,2}\.\d+)", text)
+        if m:
+            lon, lat = float(m.group(1)), float(m.group(2))
+            if -180.0 <= lon <= 180.0 and -90.0 <= lat <= 90.0:
+                return (lon, lat)
+    target = str(params.get("target") or "").strip()
+    if target and places:
+        for p in places:
+            name = str(p.get("region_name") or "").strip()
+            aliases = [a.strip() for a in str(p.get("alias") or "").split(";") if a.strip()]
+            if target == name or target in aliases:
+                lon = p.get("region_center_longitude") if p.get("region_center_longitude") is not None else p.get("longitude")
+                lat = p.get("region_center_latitude") if p.get("region_center_latitude") is not None else p.get("latitude")
+                if lon is not None and lat is not None:
+                    return (float(lon), float(lat))
+        # Substring fallback when target carries suffix like "上空" or "处"
+        for p in places:
+            name = str(p.get("region_name") or "").strip()
+            if name and name in target:
+                lon = p.get("region_center_longitude") if p.get("region_center_longitude") is not None else p.get("longitude")
+                lat = p.get("region_center_latitude") if p.get("region_center_latitude") is not None else p.get("latitude")
+                if lon is not None and lat is not None:
+                    return (float(lon), float(lat))
+    return None
+
+
+def _uav_origin(record):
+    if not isinstance(record, dict):
+        return None
+    origin = record.get("origin")
+    if isinstance(origin, dict) and origin.get("longitude") is not None and origin.get("latitude") is not None:
+        return (float(origin["longitude"]), float(origin["latitude"]))
+    if record.get("longitude") is not None and record.get("latitude") is not None:
+        return (float(record["longitude"]), float(record["latitude"]))
+    return None
+
+
+def _synthesize_scenario_actions(request, graph, variant, plan, geometry_actions, actors, fleet, places, altitude_order):
+    """Assemble standardized compact action JSON per UAV for every planned scenario."""
+    if variant.get("planning_status") in ("INFEASIBLE", "BLOCKED"):
+        return {}
+    geom_reports = {
+        p["uav_id"]: p["actions"]
+        for p in (((geometry_actions or {}).get("_summary") or {}).get("participants") or [])
+        if isinstance(p, dict) and "uav_id" in p and "actions" in p
+    } if isinstance(geometry_actions, dict) else {}
+    active = variant.get("active") or []
+    nodes = graph["indexed"]
+    bindings = request.get("runtime_bindings", {})
+    plan_task_key = (plan or {}).get("task_key")
+    if not plan_task_key:
+        sig = digest({"nodes": [nodes[n] for n in active], "scenario": variant.get("scenario_id")})[:4]
+        plan_task_key = f"TG{datetime.now().strftime('%m%d%H%M%S')}{sig}"
+
+    uav_nodes = {}
+    for nid in active:
+        for uid in actors.get(nid) or []:
+            uav_nodes.setdefault(uid, []).append(nid)
+
+    synthesized = {}
+    base_alt = float(graph.get("flight_alt", 1.2))
+    order = list(altitude_order or [])
+    for uid, nids in uav_nodes.items():
+        if uid not in order:
+            order.append(uid)
+        flight_alt = round(base_alt + 0.3 * order.index(uid), 3)
+        rec = fleet.get(uid) or {}
+        speed = request.get("speed")
+        if speed is None:
+            speed = rec.get("planning_speed") or rec.get("cruise_speed")
+        if speed is not None:
+            speed = round(float(speed), 3)
+
+        # Reuse exact geometry_actions if this UAV only has geometry nodes already assembled.
+        if uid in geom_reports and all(nodes[nid]["action"] in GEOMETRY_ACTIONS for nid in nids):
+            synthesized[uid] = {
+                "uav_id": uid,
+                "flight_alt": flight_alt,
+                "speed": speed,
+                "nodes": nids,
+                "actions": deepcopy(geom_reports[uid]),
+            }
+            continue
+
+        task_id = f"{plan_task_key}-{uid}"
+        raw = []
+
+        def add(cmd, params):
+            p = deepcopy(params)
+            if speed is not None and cmd in ("takeoff", "follow_path", "patrol_move", "fuel_explore"):
+                p.setdefault("max_vel" if cmd == "fuel_explore" else "speed", speed)
+            raw.append({"cmd": cmd, "task_id": task_id, "step_id": len(raw) + 1, "params": p})
+
+        origin = _uav_origin(rec)
+        current_pos = origin
+        did_return = False
+        did_land = False
+
+        add("arm", {})
+        add("takeoff", {"altitude": flight_alt})
+
+        for nid in nids:
+            node = nodes[nid]
+            kind = node["action"]
+            params = bind(node.get("params") or {}, bindings)
+            if kind == "transit":
+                dest = _resolve_transit_dest(node, places)
+                if dest is not None and current_pos is not None:
+                    leg = direct_route(current_pos, dest, flight_alt)
+                    add("follow_path", {"waypoints": _compact_waypoints(leg["go_waypoints"]), "skip_unreachable": False})
+                    current_pos = dest
+                else:
+                    add("follow_path", {"target": params.get("target") or params.get("description") or nid, "skip_unreachable": False})
+            elif kind in GEOMETRY_ACTIONS:
+                job = deepcopy(node.get("job") or {})
+                has_unbound = bool(list(references(bind(job, bindings))))
+                if not has_unbound:
+                    if "center_from" in job:
+                        pos = bind(job.pop("center_from"), bindings)
+                        if isinstance(pos, dict) and "longitude" in pos and "latitude" in pos:
+                            job.update(center_lon=pos["longitude"], center_lat=pos["latitude"])
+                    job.update(job_id=nid, task_type=kind)
+                    try:
+                        zone = resolve_jobs({"jobs": [job], "places": places})["jobs"][0]
+                        route = region_route(zone, flight_alt, kind, zone.get("search_lane_m"))
+                        entry = lon_lat(route["waypoints"][0])
+                        if current_pos is not None:
+                            leg = direct_route(current_pos, entry, flight_alt)
+                            add("follow_path", {"waypoints": _compact_waypoints(leg["go_waypoints"]), "skip_unreachable": False})
+                        if kind == "search":
+                            bmin, bmax = search_box(zone, flight_alt)
+                            timeout_sec = float(job.get("search_timeout") or request.get("search_timeout") or 1200)
+                            add("fuel_explore", {"box_min": bmin, "box_max": bmax, "timeout_sec": timeout_sec})
+                        else:
+                            laps = int(zone.get("laps") or 1)
+                            wview = _compact_waypoints(route["waypoints"])
+                            for _ in range(laps):
+                                add("patrol_move", {"waypoints": wview, "skip_unreachable": False})
+                        current_pos = lon_lat(route["waypoints"][-1])
+                    except Exception:
+                        add("fuel_explore" if kind == "search" else "patrol_move", {"job_id": nid, "job": job})
+                else:
+                    add("fuel_explore" if kind == "search" else "patrol_move", {"job_id": nid, "job": job})
+            elif kind in ("hover", "wait"):
+                h_params = {}
+                if "duration_s" in params:
+                    h_params["duration_sec"] = params["duration_s"]
+                else:
+                    h_params["hold"] = True
+                if params.get("description"):
+                    h_params["description"] = params["description"]
+                add("hover", h_params)
+            elif kind == "return":
+                if current_pos is not None and origin is not None and current_pos != origin:
+                    leg = direct_route(current_pos, origin, flight_alt)
+                    add("follow_path", {"waypoints": _compact_waypoints(leg["go_waypoints"]), "skip_unreachable": False})
+                    current_pos = origin
+                did_return = True
+            elif kind == "land":
+                add("land", {})
+                did_land = True
+            else:
+                add(kind, params)
+
+        if not did_land:
+            if not did_return and current_pos is not None and origin is not None and current_pos != origin:
+                leg = direct_route(current_pos, origin, flight_alt)
+                add("follow_path", {"waypoints": _compact_waypoints(leg["go_waypoints"]), "skip_unreachable": False})
+            add("land", {})
+
+        synthesized[uid] = {
+            "uav_id": uid,
+            "flight_alt": flight_alt,
+            "speed": speed,
+            "nodes": nids,
+            "actions": raw,
+        }
+    return synthesized
+
+
 def _scenario_summary(variant):
     plan = variant.get("geometry_plan") or {}
     actions = variant.get("geometry_actions")
+    synthesized = variant.get("synthesized_actions") or {}
     budgets = {b["uav_id"]: b for b in variant.get("aircraft_budgets") or [] if isinstance(b, dict) and "uav_id" in b}
+    action_reports = {
+        p["uav_id"]: p["actions"]
+        for p in ((actions.get("_summary") or {}).get("participants") or [])
+        if isinstance(p, dict) and "uav_id" in p and "actions" in p
+    } if isinstance(actions, dict) else {}
+    for uid, info in synthesized.items():
+        action_reports[uid] = info["actions"]
     job_centers = {j["job_id"]: j.get("center") for j in plan.get("jobs") or [] if isinstance(j, dict) and "job_id" in j}
     assignments = []
+    seen_uavs = set()
     for row in plan.get("assignments") or []:
         uid = row["uav_id"]
+        seen_uavs.add(uid)
         b = budgets.get(uid, {})
         origin = row.get("origin") or {}
         dists = {}
@@ -116,7 +324,21 @@ def _scenario_summary(variant):
         }
         if dists:
             item["takeoff_to_jobs_m"] = dists
+        if uid in action_reports:
+            item["actions"] = action_reports[uid]
         assignments.append(item)
+    for uid, info in synthesized.items():
+        if uid in seen_uavs:
+            continue
+        b = budgets.get(uid, {})
+        assignments.append({
+            "uav_id": uid,
+            "flight_alt": info.get("flight_alt"),
+            "speed": info.get("speed"),
+            "jobs": info.get("nodes"),
+            "time_budget_s": b.get("time_budget_s"),
+            "actions": info["actions"],
+        })
     return {
         "scenario_id": variant.get("scenario_id"),
         "events": variant.get("events"),
@@ -550,6 +772,7 @@ def compute(request):
         selected_records = prepare_candidates(dict(args, uav_ids=explicit))["candidates"]
     fleet = {r["uav_id"]: r for r in query({"entity": "fleet"})["fleet"]}
     fleet.update({r["uav_id"]: r for r in selected_records})
+    places_cache = query({"entity": "places"})["places"]
     output, locked_owners, altitude_order = [], {}, list(explicit)
     for index, variant in enumerate(variants, 1):
         result = dict(variant, scenario_id=f"B{index}")
@@ -572,6 +795,10 @@ def compute(request):
                 result["violations"].append(_issue("ACTION_VALIDATION", actions["message"]))
             result["planning_status"] = ("INFEASIBLE" if physical_failure else "BLOCKED" if action_failure
                                          else "CONDITIONAL" if pending else "PLANNED")
+            if _show_actions_flag():
+                result["synthesized_actions"] = _synthesize_scenario_actions(
+                    request, graph, result, plan, actions, result["actors"], fleet, places_cache, altitude_order
+                )
         except AtomicError as exc:
             result.update(planning_status="CONDITIONAL" if exc.code == "PREFIX_ALLOCATION_UNCONFIRMED" else "INFEASIBLE" if exc.code in {
                 "NO_FEASIBLE_ALLOCATION", "BUDGET_EXCEEDED", "ALTITUDE_INFEASIBLE", "NO_CANDIDATE", "CANDIDATE_EXCLUDED"
