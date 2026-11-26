@@ -92,6 +92,26 @@ class NumericPlanningTests(unittest.TestCase):
             compute(graph(area(), flight_alt=2501))
         self.assertEqual(error.exception.code, "CANDIDATE_EXCLUDED")
 
+    def test_unspecified_ending_returns_home_by_default(self):
+        def endings(**kwargs):
+            result = compute(graph(area(), flight_alt=50, **kwargs))
+            return [a["cmd"] for a in result["_summary"]["scenarios"][0]["assignments"][0]["actions"]]
+
+        self.assertEqual(endings()[-1], "land")
+        self.assertEqual(endings(return_to_home=False)[-1], "hover")
+
+        # 末节点本身为 hover 且未显式传 return_to_home 时，自动不追加返航与 land
+        hover_res = compute({
+            "uav_ids": ["UAV-303"],
+            "nodes": [
+                {"id": "M1", "action": "transit", "uav_id": "UAV-303", "params": {"target": "测试点", "description": "飞往(120.677814,24.100945)"}},
+                {"id": "H1", "action": "hover", "uav_id": "UAV-303", "params": {"description": "到达后原地盘旋待命"}},
+            ],
+            "edges": [{"from": "M1", "to": "H1", "on": "completed"}],
+        })
+        hover_cmds = [a["cmd"] for a in hover_res["_summary"]["scenarios"][0]["assignments"][0]["actions"]]
+        self.assertEqual(hover_cmds, ["arm", "takeoff", "follow_path", "hover"])
+
     def test_cross_aircraft_dependency_is_scheduled(self):
         b = area("B", "UAV-254")
         # Both aircraft are registered near this site.

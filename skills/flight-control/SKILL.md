@@ -22,6 +22,6 @@ uav_runtime/.venv/bin/python uav_runtime/run.py skills/flight-control/scripts/as
 
 ## 航高、结束策略与安全边界
 - **定高边界**：`fuel_explore` 的 `box_min[2]`/`box_max[2]` 是搜索空间上下界而非全程定高参数；用户明确要求定高时，保留几何方案并说明搜索阶段定高尚未验证，不手改搜索框。
-- **悬停结束（HOLD）**：无目标探索/巡逻要求完成后原地悬停时，保留 `build` 的备用返航与 `land` 段，另在 `policies` 设 `"on_search_complete":"HOLD"`（严禁删返航段实现 HOLD）。
+- **默认返航（往返计算）**：用户未指定结束动作时省略 `return_to_home`（默认 `true`），`costs`/`build` 按往返计算，`assemble_plan` 以返航段+`land` 结束；仅当用户**明确要求**盘旋/悬停/待命/不返航时，上游 `costs` 传 `"return_to_home": false`（只算单程），`assemble_plan` 自动以 `{"cmd": "hover", ..., "params": {}}` 结束且不附加返航段和 `land`。
 - **转换范围**：动态采用本次返回的 `max_distance_m`，不写死公里数，不与物理航程混淆。
 - **中央控制边界**：中央接管的机严禁去掉 `--dry-run` 直接发布动作队列或直发 ROS 话题；严禁将 `dry_run.batch` 已转换本地坐标二次转换或注册。

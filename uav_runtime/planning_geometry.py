@@ -83,6 +83,7 @@ def cost_geometry(prepared, routes=None, work_range=None):
     costs = {"work_range": work_range,
              "work_time": [d / job["work_speed"] for d, job in zip(work_range, prepared["jobs"])],
              "transfer_range": {}, "transfer_time": {}, "reachable": {}}
+    return_to_home = prepared.get("return_to_home", True)
     for candidate in prepared["candidates"]:
         uid = candidate["uav_id"]
         home = lon_lat(candidate["origin"])
@@ -92,7 +93,7 @@ def cost_geometry(prepared, routes=None, work_range=None):
         for i, end_of_previous_job in enumerate(exits):
             row = []
             for j, start_of_next_job in enumerate(entries):
-                if i == j:
+                if i == j or (not return_to_home and j == 0):
                     row.append(0.0)
                 else:
                     leg = direct_route(end_of_previous_job, start_of_next_job, altitude, points=0)
@@ -190,6 +191,9 @@ def build_steps(prepared, ordered, origin, altitude, timeout, work_speed=None, i
                              estimated_time_s=lap_length / (work_speed or zone["work_speed"]))
         steps.append(operation)
         previous = lon_lat(waypoints[-1])
+    if not prepared.get("return_to_home", True):
+        steps.append({"type": "hover"})
+        return steps, transit_range, work_range, work_time
     transfer = direct_route(previous, home, altitude)
     transit = {"type": "transit", "to": "home", "waypoints": transfer["go_waypoints"]}
     if include_metrics:

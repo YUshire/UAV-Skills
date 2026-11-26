@@ -69,7 +69,7 @@ python3 "$MIGRATION_ROOT/scripts/mission_client.py" <操作> --agent-session-id 
  "approach_profile_ref":{"id":"approach-default","revision":7},"tracking_profile_ref":{"id":"tracking-default","revision":1}}
 ```
 
-两个 profile 的 id 和 revision 以 `status.target_action_profiles` 的返回为准。跟踪时长、距离由 profile 固定，用户另指定时说明暂不支持修改。用户明确要求任务结束后不返航时，在 `policies` 里加 `"on_search_complete":"HOLD"`（作业完成后原地悬停，等待后续指令）。
+两个 profile 的 id 和 revision 以 `status.target_action_profiles` 的返回为准。跟踪时长、距离由 profile 固定，用户另指定时说明暂不支持修改。用户明确要求任务结束后盘旋/悬停/待命或不返航时，在 `policies` 里加 `"on_search_complete":"HOLD"`（作业完成后原地悬停，等待后续指令）；未指定时默认返航降落。
 
 **3. preview**：`{"spec":<authorize 返回的 spec>}`，返回 `preview_id`（60 s 内有效，只能用一次），拿到后立即 submit。
 

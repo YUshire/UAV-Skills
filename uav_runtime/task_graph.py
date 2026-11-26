@@ -39,9 +39,12 @@ def validate(request):
     """Validate graph identity, dependencies, event gates and runtime references."""
     require(request, "input", dict)
     allowed = {"nodes", "edges", "flight_alt", "speed", "search_timeout", "uav_ids", "payload",
-               "exclude_uavs", "constraints", "solver_options", "max_duration_s", "runtime_bindings", "observed_events"}
+               "exclude_uavs", "constraints", "solver_options", "max_duration_s", "runtime_bindings",
+               "observed_events", "return_to_home"}
     if set(request) - allowed:
         _invalid("任务图含不支持的字段；循环任务需先展开为有界步骤", fields=sorted(set(request) - allowed))
+    if "return_to_home" in request and type(request["return_to_home"]) is not bool:
+        _invalid("return_to_home须为布尔值")
     raw = require(required(request, "nodes"), "nodes", list)
     if not 1 <= len(raw) <= 64:
         _invalid("nodes 数量须为1..64；循环任务需有明确停止条件")
