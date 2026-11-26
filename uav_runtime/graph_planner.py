@@ -200,6 +200,7 @@ def _synthesize_scenario_actions(request, graph, variant, plan, geometry_actions
         current_pos = origin
         did_return = False
         did_land = False
+        total_range_m = 0.0
 
         add("arm", {})
         add("takeoff", {"altitude": flight_alt})
@@ -212,6 +213,7 @@ def _synthesize_scenario_actions(request, graph, variant, plan, geometry_actions
                 dest = _resolve_transit_dest(node, places)
                 if dest is not None and current_pos is not None:
                     leg = direct_route(current_pos, dest, flight_alt)
+                    total_range_m += leg["one_way_distance"]
                     add("follow_path", {"waypoints": _compact_waypoints(leg["go_waypoints"]), "skip_unreachable": False})
                     current_pos = dest
                 else:
@@ -231,13 +233,16 @@ def _synthesize_scenario_actions(request, graph, variant, plan, geometry_actions
                         entry = lon_lat(route["waypoints"][0])
                         if current_pos is not None:
                             leg = direct_route(current_pos, entry, flight_alt)
+                            total_range_m += leg["one_way_distance"]
                             add("follow_path", {"waypoints": _compact_waypoints(leg["go_waypoints"]), "skip_unreachable": False})
                         if kind == "search":
                             bmin, bmax = search_box(zone, flight_alt)
                             timeout_sec = float(job.get("search_timeout") or request.get("search_timeout") or 1200)
+                            total_range_m += route["path_length"]
                             add("fuel_explore", {"box_min": bmin, "box_max": bmax, "timeout_sec": timeout_sec})
                         else:
                             laps = int(zone.get("laps") or 1)
+                            total_range_m += route["path_length"] * laps
                             wview = _compact_waypoints(route["waypoints"])
                             for _ in range(laps):
                                 add("patrol_move", {"waypoints": wview, "skip_unreachable": False})
@@ -247,17 +252,12 @@ def _synthesize_scenario_actions(request, graph, variant, plan, geometry_actions
                 else:
                     add("fuel_explore" if kind == "search" else "patrol_move", {"job_id": nid, "job": job})
             elif kind in ("hover", "wait"):
-                h_params = {}
-                if "duration_s" in params:
-                    h_params["duration_sec"] = params["duration_s"]
-                else:
-                    h_params["hold"] = True
-                if params.get("description"):
-                    h_params["description"] = params["description"]
-                add("hover", h_params)
+                # 与 submit_queue_batch 校验契约保持一致：hover.params 必须为空对象
+                add("hover", {})
             elif kind == "return":
                 if current_pos is not None and origin is not None and current_pos != origin:
                     leg = direct_route(current_pos, origin, flight_alt)
+                    total_range_m += leg["one_way_distance"]
                     add("follow_path", {"waypoints": _compact_waypoints(leg["go_waypoints"]), "skip_unreachable": False})
                     current_pos = origin
                 did_return = True
@@ -267,17 +267,33 @@ def _synthesize_scenario_actions(request, graph, variant, plan, geometry_actions
             else:
                 add(kind, params)
 
-        if not did_land:
-            if not did_return and current_pos is not None and origin is not None and current_pos != origin:
-                leg = direct_route(current_pos, origin, flight_alt)
-                add("follow_path", {"waypoints": _compact_waypoints(leg["go_waypoints"]), "skip_unreachable": False})
+        # 未指定时默认返航；显式 return_to_home:false，或未显式指定 return_to_home 且末节点本身为 hover/wait 时，原地悬停不返航
+        last_action = nodes[nids[-1]]["action"] if nids else None
+        if "return_to_home" in request:
+            return_to_home = request["return_to_home"]
+        else:
+            return_to_home = last_action not in ("hover", "wait")
+        if did_return and not did_land:
             add("land", {})
+        elif not did_land and not did_return:
+            if return_to_home:
+                if current_pos is not None and origin is not None and current_pos != origin:
+                    leg = direct_route(current_pos, origin, flight_alt)
+                    total_range_m += leg["one_way_distance"]
+                    add("follow_path", {"waypoints": _compact_waypoints(leg["go_waypoints"]), "skip_unreachable": False})
+                add("land", {})
+            else:
+                # 显式要求盘旋/悬停/待命：不返航、只算单程，任务结束后原地悬停
+                if not raw or raw[-1]["cmd"] != "hover":
+                    add("hover", {})
 
         synthesized[uid] = {
             "uav_id": uid,
             "flight_alt": flight_alt,
             "speed": speed,
             "nodes": nids,
+            "estimated_range_m": round(total_range_m, 3) if total_range_m > 0 else None,
+            "return_to_home": bool(did_return or return_to_home),
             "actions": raw,
         }
     return synthesized
@@ -331,14 +347,18 @@ def _scenario_summary(variant):
         if uid in seen_uavs:
             continue
         b = budgets.get(uid, {})
-        assignments.append({
+        item = {
             "uav_id": uid,
             "flight_alt": info.get("flight_alt"),
             "speed": info.get("speed"),
             "jobs": info.get("nodes"),
             "time_budget_s": b.get("time_budget_s"),
+            "return_to_home": info.get("return_to_home"),
             "actions": info["actions"],
-        })
+        }
+        if info.get("estimated_range_m") is not None:
+            item["estimated_range_m"] = info["estimated_range_m"]
+        assignments.append(item)
     return {
         "scenario_id": variant.get("scenario_id"),
         "events": variant.get("events"),
@@ -438,7 +458,7 @@ def _routes(request, graph, active, locked_owners=None, altitude_order=None):
     prepared = prepare_candidates(candidate_args)
     places = query({"entity": "places"})["places"] if any("place" in j for j in jobs) else []
     resolved = resolve_jobs({"jobs": jobs, "places": places})
-    parameters = {k: request[k] for k in ("flight_alt", "speed") if k in request}
+    parameters = {k: request[k] for k in ("flight_alt", "speed", "return_to_home") if k in request}
     estimate = costs(dict(parameters, ordered=True, candidates=prepared["candidates"], jobs=resolved["jobs"]))
     supplied = deepcopy(request.get("constraints", {}))
     require(supplied, "constraints", dict)
@@ -530,7 +550,7 @@ def _timing(request, graph, variant, plan, fleet, pending):
                 transit = step["estimated_time_s"]
                 if step["to"] == "home":
                     tail[uid] = transit
-            else:
+            elif "estimated_time_s" in step and "job_id" in step:
                 duration = step["estimated_time_s"]
                 # Reserve the full search timeout, instead of treating a short
                 # strip estimate as a guarantee about autonomous search time.
@@ -727,7 +747,10 @@ def _reply(graph, variants, state, request):
     if "max_duration_s" in request:
         lines.append(f"全任务总时限{request['max_duration_s']:g}秒。")
     if not any(n["action"] in {"return", "land"} for n in graph["nodes"]):
-        lines.append("各分支结束后默认返航降落；未指定结束点的录像持续到该分支任务结束。")
+        if request.get("return_to_home", True):
+            lines.append("未明确要求悬停/待命时，任务结束后默认返航降落（按往返计算）；未指定结束点的录像持续到该分支任务结束。")
+        else:
+            lines.append("按要求任务结束后原地悬停（不返航、按单程计算）；未指定结束点的录像持续到该分支任务结束。")
     for variant in variants:
         assignments = (variant.get("geometry_plan") or {}).get("assignments", [])
         if assignments:

@@ -75,22 +75,31 @@ def compute(request):
 
         add("arm", {})
         add("takeoff", {"altitude": required(assignment, "flight_alt")})
-        for step in require(required(assignment, "steps"), "steps", list):
+        steps = require(required(assignment, "steps"), "steps", list)
+        ends_with_hover = False
+        for step in steps:
             require(step, "step", dict)
             kind = required(step, "type")
             if kind == "transit":
                 add("follow_path", {"waypoints": required(step, "waypoints"), "skip_unreachable": False})
+                ends_with_hover = False
             elif kind == "search":
                 add("fuel_explore", {key: required(step, key) for key in ("box_min", "box_max", "timeout_sec")})
+                ends_with_hover = False
             elif kind == "patrol":
                 laps = required(step, "laps")
                 if type(laps) is not int or laps < 1:
                     raise AtomicError("INVALID_ARGUMENT", "巡逻 laps 须为正整数")
                 for _ in range(laps):
                     add("patrol_move", {"waypoints": required(step, "waypoints"), "skip_unreachable": False})
+                ends_with_hover = False
+            elif kind == "hover":
+                add("hover", {})
+                ends_with_hover = True
             else:
                 raise AtomicError("INVALID_ARGUMENT", "不支持的航段类型", step_type=kind)
-        add("land", {})
+        if not ends_with_hover:
+            add("land", {})
         origin = require(required(assignment, "origin"), "origin", dict)
         try:
             batch = batch_validator.validate_batch(raw, origin_lat=required(origin, "latitude"),
