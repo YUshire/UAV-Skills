@@ -16,7 +16,7 @@ def lon_lat(waypoint):
 def job_radius(job):
     """Farthest horizontal distance from the job centre to its action area."""
     if job["shape"] == "circle":
-        return job["radius"] * (2 ** 0.5 if job["task_type"] == "search" else 1.0)
+        return job["radius"]
     return (job["length"] ** 2 + job["width"] ** 2) ** 0.5 / 2
 
 
@@ -36,18 +36,60 @@ def search_coverage_m(length, width, lane):
     return lanes * long_side + (lanes - 1) * lane
 
 
+def search_circle_coverage_m(radius, lane):
+    """Circle coverage chord-sum length, matching data-construction scenario_geometry.py."""
+    diameter = 2.0 * radius
+    if diameter <= 0:
+        return 0.0
+    lanes = max(1, math.ceil(round(diameter / lane, 9)))
+    spacing = diameter / lanes
+    chords = []
+    for i in range(lanes):
+        low = -radius + i * spacing
+        high = -radius + (i + 1) * spacing
+        y = 0.0 if low <= 0.0 <= high else min(abs(low), abs(high))
+        chords.append(2.0 * math.sqrt(max(0.0, radius * radius - y * y)))
+    return sum(chords) + (lanes - 1) * spacing
+
+
+def candidate_fov_deg(candidate, fallback=89.0):
+    fov = candidate.get("fov") if isinstance(candidate, dict) else None
+    if isinstance(fov, (int, float)) and not isinstance(fov, bool) and math.isfinite(fov) and fov > 0:
+        return float(fov)
+    return float(fallback)
+
+
+def job_search_work_m(job, lane):
+    """Nominal coverage length for a search job using data-construction formulas."""
+    if job["shape"] == "rectangle":
+        return search_coverage_m(job["length"], job["width"], lane) * job["laps"]
+    return search_circle_coverage_m(job["radius"], lane) * job["laps"]
+
+
+def job_path_mode(job, default_task_type=None):
+    """Orthogonal geometry mode: coverage (parallel sweep) vs boundary (closed loop)."""
+    if job.get("path_mode") in ("coverage", "boundary"):
+        return job["path_mode"]
+    tt = job.get("task_type") or default_task_type or "search"
+    return "boundary" if tt == "patrol" else "coverage"
+
+
 def region_route(area, altitude, task_type, lane=None):
     """Use the public area query for both costing and final trajectories."""
-    if task_type == "search" and area["shape"] == "circle":
-        # The search action consumes an axis-aligned box. Cost the bounding
-        # square so the estimate matches the executed search area.
+    mode = area.get("path_mode") or ("boundary" if task_type == "patrol" else "coverage")
+    # Only autonomous box search (task_type=search, mode=coverage) uses an axis-aligned
+    # bounding square for fuel_explore. Circular coverage patrol (task_type=patrol,
+    # mode=coverage) and all boundary loops preserve true circle geometry.
+    if task_type == "search" and mode == "coverage" and area["shape"] == "circle":
         side = 2 * area["radius"]
         area = {**area, "shape": "rectangle", "length": side, "width": side}
     center = area["center"]
-    start = center
+    entry_side = area.get("entry_side")
+    direction = area.get("direction") or "ccw"
+    start = None if entry_side is not None else center
     # A registered entrance can be outside this job (especially after a split).
     entrance = area.get("entrance")
-    if entrance is not None and task_type != "patrol":
+    if entry_side is None and entrance is not None and mode != "boundary":
         east, north = LocalFrame(*center).to_xy(*entrance)
         if area["shape"] == "rectangle":
             inside = abs(east) <= area["length"] / 2 and abs(north) <= area["width"] / 2
@@ -60,8 +102,11 @@ def region_route(area, altitude, task_type, lane=None):
                            flight_alt=altitude, shape=area["shape"], length=area.get("length"),
                            width=area.get("width"), radius=area.get("radius"),
                            lane=2.0 if lane is None else lane,
-                           mode="boundary" if task_type == "patrol" else "coverage",
-                           start_lon=start[0], start_lat=start[1])
+                           mode=mode,
+                           start_lon=start[0] if start is not None else None,
+                           start_lat=start[1] if start is not None else None,
+                           entry_side=entry_side,
+                           direction=direction)
     return query_area(args)
 
 
@@ -73,19 +118,31 @@ def cost_geometry(prepared, routes=None, work_range=None):
     if work_range is None:
         work_range = []
         for route, job in zip(routes, prepared["jobs"]):
-            if job["task_type"] == "search" and job["shape"] == "rectangle":
-                base = search_coverage_m(job["length"], job["width"],
-                                         job.get("search_lane_m") or 2.0)
+            if job_path_mode(job) == "coverage":
+                work_range.append(job_search_work_m(job, job.get("search_lane_m") or 2.0))
             else:
-                base = route["path_length"]
-            work_range.append(base * job["laps"])
+                work_range.append(route["path_length"] * job["laps"])
     job_ids = [job["job_id"] for job in prepared["jobs"]]
+    req_work_speed = prepared.get("requested_work_speed")
     costs = {"work_range": work_range,
              "work_time": [d / job["work_speed"] for d, job in zip(work_range, prepared["jobs"])],
+             "work_range_by_uav": {}, "work_time_by_uav": {},
              "transfer_range": {}, "transfer_time": {}, "reachable": {}}
     return_to_home = prepared.get("return_to_home", True)
     for candidate in prepared["candidates"]:
         uid = candidate["uav_id"]
+        cand_alt = candidate.get("planning_alt", altitude)
+        cand_fov = candidate_fov_deg(candidate, prepared["jobs"][0].get("fov_deg") or 89.0)
+        cand_work_speed = req_work_speed if req_work_speed is not None else candidate["planning_speed"]
+        cand_work = []
+        for route, job in zip(routes, prepared["jobs"]):
+            if job_path_mode(job) == "coverage":
+                lane = search_lane_m(cand_alt, cand_fov)
+                cand_work.append(job_search_work_m(job, lane))
+            else:
+                cand_work.append(route["path_length"] * job["laps"])
+        costs["work_range_by_uav"][uid] = cand_work
+        costs["work_time_by_uav"][uid] = [w / cand_work_speed for w in cand_work]
         home = lon_lat(candidate["origin"])
         entries = [home] + [lon_lat(route["waypoints"][0]) for route in routes]
         exits = [home] + [lon_lat(route["waypoints"][-1]) for route in routes]
@@ -152,14 +209,21 @@ def search_box(zone, altitude):
     return [west, min(lat for _, lat in samples), 0.3], [east_lon, max(lat for _, lat in samples), round(altitude + 0.5, 3)]
 
 
-def build_steps(prepared, ordered, origin, altitude, timeout, work_speed=None, include_metrics=False):
+def build_steps(prepared, ordered, origin, altitude, timeout, work_speed=None, include_metrics=False, candidate_fov=None, transit_speed=None):
     """Connect the actual first/last waypoints of consecutive jobs and the home point."""
     home = previous = lon_lat(origin)
     steps = []
     transit_range = work_range = work_time = 0.0
+    t_speed = transit_speed or work_speed or prepared["speeds"]["transit"]
     for zone in ordered:
         task_type = zone["task_type"]
-        route = region_route(zone, altitude, task_type, zone.get("search_lane_m"))
+        mode = job_path_mode(zone, task_type)
+        w_speed = prepared.get("requested_work_speed") or work_speed or zone["work_speed"]
+        if mode == "coverage" and candidate_fov is not None:
+            lane = search_lane_m(altitude, candidate_fov)
+        else:
+            lane = zone.get("search_lane_m")
+        route = region_route(zone, altitude, task_type, lane)
         waypoints = route["waypoints"]
         transfer = direct_route(previous, lon_lat(waypoints[0]), altitude)
         transit_range += transfer["one_way_distance"]
@@ -167,28 +231,33 @@ def build_steps(prepared, ordered, origin, altitude, timeout, work_speed=None, i
         transit = {"type": "transit", "to": job_id, "waypoints": transfer["go_waypoints"]}
         if include_metrics:
             transit.update(estimated_range_m=transfer["one_way_distance"],
-                           estimated_time_s=transfer["one_way_distance"]
-                           / (work_speed or zone["work_speed"]))
+                           estimated_time_s=transfer["one_way_distance"] / t_speed)
         steps.append(transit)
-        if task_type == "search" and zone["shape"] == "rectangle":
-            base = search_coverage_m(zone["length"], zone["width"],
-                                     zone.get("search_lane_m") or 2.0)
+        if mode == "coverage":
+            lap_length = job_search_work_m(zone, lane or 2.0)
         else:
-            base = route["path_length"]
-        lap_length = base * zone["laps"]
+            lap_length = route["path_length"] * zone["laps"]
         work_range += lap_length
-        work_time += lap_length / (work_speed or zone["work_speed"])
-        operation = {"type": task_type, "job_id": job_id,
+        work_time += lap_length / w_speed
+        operation = {"type": task_type, "path_mode": mode, "job_id": job_id,
                      "name": zone.get("name", job_id), "zone": zone["label"]}
-        if task_type == "patrol":
+        if prepared.get("requested_work_speed") is not None:
+            operation["work_speed"] = w_speed
+        if zone.get("entry_side"):
+            operation["entry_side"] = zone["entry_side"]
+        if zone.get("direction"):
+            operation["direction"] = zone["direction"]
+        if task_type == "patrol" or mode == "boundary":
             operation.update(waypoints=waypoints, laps=zone["laps"])
+            if task_type == "search":
+                operation["timeout_sec"] = zone.get("search_timeout", timeout)
         else:
             low, high = search_box(zone, altitude)
             operation.update(box_min=low, box_max=high,
                              timeout_sec=zone.get("search_timeout", timeout), waypoints=waypoints)
         if include_metrics:
             operation.update(estimated_range_m=lap_length,
-                             estimated_time_s=lap_length / (work_speed or zone["work_speed"]))
+                             estimated_time_s=lap_length / w_speed)
         steps.append(operation)
         previous = lon_lat(waypoints[-1])
     if not prepared.get("return_to_home", True):
@@ -198,7 +267,6 @@ def build_steps(prepared, ordered, origin, altitude, timeout, work_speed=None, i
     transit = {"type": "transit", "to": "home", "waypoints": transfer["go_waypoints"]}
     if include_metrics:
         transit.update(estimated_range_m=transfer["one_way_distance"],
-                       estimated_time_s=transfer["one_way_distance"]
-                       / (work_speed or prepared["speeds"]["transit"]))
+                       estimated_time_s=transfer["one_way_distance"] / t_speed)
     steps.append(transit)
     return steps, transit_range + transfer["one_way_distance"], work_range, work_time

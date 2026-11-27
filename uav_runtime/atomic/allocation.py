@@ -118,7 +118,10 @@ def _grouped_costs(data, candidates, uids):
                                           group_value=actual, global_value=expected)
         clean = {"work_range": _vector(required(costs, "work_range"), len(jids), "work_range"),
                  "work_time": _vector(required(costs, "work_time"), len(jids), "work_time", True),
+                 "work_range_by_uav": {}, "work_time_by_uav": {},
                  "transfer_range": {}, "transfer_time": {}, "reachable": {}}
+        raw_wr_uav = costs.get("work_range_by_uav")
+        raw_wt_uav = costs.get("work_time_by_uav")
         for uid in block_uids:
             reachable = require(maps["reachable"][uid], f"{gid}.reachable.{uid}", list)
             if (any(not isinstance(jid, str) or jid not in jids for jid in reachable)
@@ -127,6 +130,10 @@ def _grouped_costs(data, candidates, uids):
             clean["reachable"][uid] = list(reachable)
             for key in ("transfer_range", "transfer_time"):
                 clean[key][uid] = _matrix(maps[key][uid], jids, reachable, f"{gid}.{key}.{uid}")
+            if isinstance(raw_wr_uav, dict) and uid in raw_wr_uav:
+                clean["work_range_by_uav"][uid] = _vector(raw_wr_uav[uid], len(jids), f"{gid}.work_range_by_uav.{uid}")
+            if isinstance(raw_wt_uav, dict) and uid in raw_wt_uav:
+                clean["work_time_by_uav"][uid] = _vector(raw_wt_uav[uid], len(jids), f"{gid}.work_time_by_uav.{uid}", True)
         offset = len(jobs)
         jobs.extend(deepcopy(block_jobs))
         blocks.append({"group_id": gid, "job_ids": jids, "candidate_uav_ids": [uid for uid in uids if uid in block_uids],
@@ -136,12 +143,22 @@ def _grouped_costs(data, candidates, uids):
     # internal placeholders: the model fixes those arcs to zero, never flies them.
     merged = {key: {uid: [[None if j == k else 0.0 for k in range(n + 1)] for j in range(n + 1)]
                     for uid in uids} for key in ("transfer_range", "transfer_time")}
+    has_per_uav_work = any(block["costs"]["work_range_by_uav"] for block in blocks)
     merged.update(work_range=[], work_time=[], reachable={uid: [] for uid in uids})
+    if has_per_uav_work:
+        merged["work_range_by_uav"] = {uid: [] for uid in uids}
+        merged["work_time_by_uav"] = {uid: [] for uid in uids}
     for block in blocks:
         clean = block["costs"]
         positions = [0] + [block["offset"] + j + 1 for j in range(len(block["job_ids"]))]
         for key in ("work_range", "work_time"):
             merged[key].extend(clean[key][1:])
+        if has_per_uav_work:
+            for uid in uids:
+                u_wr = clean["work_range_by_uav"].get(uid, clean["work_range"])
+                u_wt = clean["work_time_by_uav"].get(uid, clean["work_time"])
+                merged["work_range_by_uav"][uid].extend(u_wr[1:])
+                merged["work_time_by_uav"][uid].extend(u_wt[1:])
         for uid in block["candidate_uav_ids"]:
             merged["reachable"][uid].extend(clean["reachable"][uid])
             for key in ("transfer_range", "transfer_time"):
@@ -216,6 +233,12 @@ def compute(data):
             raise AtomicError("INVALID_ARGUMENT", f"{name} 的无人机编号必须与 candidates 完全一致")
     work_range = _vector(required(costs, "work_range"), n, "work_range")
     work_time = _vector(required(costs, "work_time"), n, "work_time", positive=True)
+    work_range_by_uav = costs.get("work_range_by_uav")
+    work_time_by_uav = costs.get("work_time_by_uav")
+    if work_range_by_uav is not None:
+        require(work_range_by_uav, "costs.work_range_by_uav", dict)
+    if work_time_by_uav is not None:
+        require(work_time_by_uav, "costs.work_time_by_uav", dict)
     eligible = {jid: [] for jid in jids}
     rows = []
     for index, candidate in enumerate(candidates, 1):
@@ -226,10 +249,17 @@ def compute(data):
             raise AtomicError("INVALID_ARGUMENT", f"reachable.{uid} 包含未知或重复作业")
         for jid in reachable:
             eligible[jid].append(index)
+        uav_work_range = (
+            _vector(work_range_by_uav[uid], n, f"work_range_by_uav.{uid}")
+            if work_range_by_uav is not None and uid in work_range_by_uav
+            else list(work_range)
+        )
         speed = candidate.get("planning_speed")
-        if speed is not None:
+        if work_time_by_uav is not None and uid in work_time_by_uav:
+            base_time = _vector(work_time_by_uav[uid], n, f"work_time_by_uav.{uid}", positive=True)
+        elif speed is not None:
             speed = finite(speed, f"{uid}.planning_speed", True)
-            base_time = [None] + [w / speed for w in work_range[1:]]
+            base_time = [None] + [w / speed for w in uav_work_range[1:]]
         else:
             base_time = list(work_time)
         rows.append({"id": index,
@@ -237,7 +267,7 @@ def compute(data):
                      "max_endurance": finite(required(candidate, "time_budget"), f"{uid}.time_budget", True),
                      "transfer_range": _matrix(distances[uid], jids, reachable, f"transfer_range.{uid}"),
                      "transfer_time": _matrix(times[uid], jids, reachable, f"transfer_time.{uid}"),
-                     "patrol_range_base": list(work_range), "patrol_time_base": base_time})
+                     "patrol_range_base": uav_work_range, "patrol_time_base": base_time})
     constraints = deepcopy(require(data.get("constraints", {}), "constraints", dict))
     if set(constraints) - {"fixed_assignments", "required_drones", "single_owner_jobs", "allowed_assignments"}:
         raise AtomicError("INVALID_ARGUMENT", "constraints 含不支持的字段")

@@ -3,6 +3,7 @@ from copy import deepcopy
 import re
 
 from .atomic.common import AtomicError, finite, require, required
+from .budget_math import DEFAULT_REF_ALT_M
 
 GEOMETRY_ACTIONS = {"search", "patrol"}
 INTERFACE_ACTIONS = {"record_start", "record_stop", "photo", "set_mode", "scan",
@@ -38,7 +39,7 @@ def references(value):
 def validate(request):
     """Validate graph identity, dependencies, event gates and runtime references."""
     require(request, "input", dict)
-    allowed = {"nodes", "edges", "flight_alt", "speed", "search_timeout", "uav_ids", "payload",
+    allowed = {"nodes", "edges", "flight_alt", "speed", "work_speed", "search_timeout", "uav_ids", "payload",
                "exclude_uavs", "constraints", "solver_options", "max_duration_s", "runtime_bindings",
                "observed_events", "return_to_home"}
     if set(request) - allowed:
@@ -48,12 +49,12 @@ def validate(request):
     raw = require(required(request, "nodes"), "nodes", list)
     if not 1 <= len(raw) <= 64:
         _invalid("nodes 数量须为1..64；循环任务需有明确停止条件")
-    altitude = finite(request.get("flight_alt", 1.2), "flight_alt", True)
+    altitude = finite(request.get("flight_alt", DEFAULT_REF_ALT_M), "flight_alt", True)
     # Exploration boxes have a fixed lower z of 0.3 m. Legacy low-level
     # geometry remains permissive; this mission entry enforces its actual floor.
     if altitude <= 0.3:
         _invalid("任务航高须大于0.3米；上限由参与机型升限决定")
-    for key in ("speed", "search_timeout", "max_duration_s"):
+    for key in ("speed", "work_speed", "search_timeout", "max_duration_s"):
         if key in request:
             finite(request[key], key, True)
     nodes, indexed = [], {}
@@ -91,7 +92,7 @@ def validate(request):
                 ref = job["center_from"]
                 if not isinstance(ref, dict) or set(ref) != {"from_step", "field"}:
                     _invalid("center_from须为动态目标位置引用", node_id=nid)
-                if set(job) - {"center_from", "shape", "radius", "length", "width", "name", "laps", "search_timeout"}:
+                if set(job) - {"center_from", "shape", "radius", "length", "width", "name", "path_mode", "entry_side", "direction", "laps", "search_timeout"}:
                     _invalid("动态区域含不支持或冲突的字段", node_id=nid)
                 shape = job.get("shape")
                 if shape not in ("circle", "rectangle"):

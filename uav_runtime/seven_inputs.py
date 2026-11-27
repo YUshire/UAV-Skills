@@ -4,6 +4,7 @@ import importlib.util
 import math
 
 from .atomic.common import AtomicError, require, required
+from .budget_math import DEFAULT_REF_ALT_M
 from .direct_path import EARTH_RADIUS_M, direct_route
 from .paths import ROOT
 
@@ -34,7 +35,8 @@ def prepare_candidates(data):
     spatial_fields = {'center_lon', 'center_lat', 'radius_m', 'job_radius_m'}
     if set(data) - ({'uav_ids', 'exclude_uavs', 'payload', 'flight_alt'} | spatial_fields):
         raise AtomicError('INVALID_ARGUMENT', '候选查询含不支持的字段')
-    altitude = number(data.get('flight_alt', 1.2), 'flight_alt', True)
+    explicit_alt = data.get('flight_alt') is not None
+    altitude = number(data['flight_alt'], 'flight_alt', True) if explicit_alt else DEFAULT_REF_ALT_M
     has_lon, has_lat = 'center_lon' in data, 'center_lat' in data
     if has_lon != has_lat:
         raise AtomicError('INVALID_ARGUMENT', 'center_lon与center_lat须成对提供')
@@ -101,7 +103,9 @@ def prepare_candidates(data):
             raise AtomicError('NO_CANDIDATE', '附近预筛范围内没有机队记录',
                               spatial_filter=spatial_filter)
     selection_input = {key: value for key, value in data.items() if key not in spatial_fields}
-    selected = select(dict(selection_input, fleet=fleet, flight_alt=altitude))
+    if not explicit_alt:
+        selection_input.pop('flight_alt', None)
+    selected = select(dict(selection_input, fleet=fleet, **({'flight_alt': altitude} if explicit_alt else {})))
     relevant_missing = [row for row in missing if not data.get('uav_ids') or row['uav_id'] in data['uav_ids']]
     excluded = selected['excluded'] + relevant_missing
     if data.get('uav_ids') and excluded:
@@ -109,7 +113,7 @@ def prepare_candidates(data):
         # read as "the whole fleet cannot do it".
         alternative_input = {key: value for key, value in selection_input.items() if key != 'uav_ids'}
         try:
-            alternatives = select(dict(alternative_input, fleet=fleet, flight_alt=altitude))['candidates']
+            alternatives = select(dict(alternative_input, fleet=fleet, **({'flight_alt': altitude} if explicit_alt else {})))['candidates']
         except AtomicError:
             alternatives = []
         available = [{key: row.get(key) for key in
@@ -247,7 +251,7 @@ def resolve_jobs(data):
         for label in set([name] + [part.strip() for part in (alias or '').split(';') if part.strip()]):
             indexed.setdefault(label, []).append(row)
     allowed = {'job_id', 'name', 'place', 'center_lon', 'center_lat', 'shape', 'radius', 'length', 'width', 'uav_id',
-               'task_type', 'laps', 'search_timeout'}
+               'task_type', 'path_mode', 'entry_side', 'direction', 'laps', 'search_timeout'}
     jobs, seen = [], set()
     for i, item in enumerate(raw_jobs, 1):
         require(item, 'jobs[]', dict)
@@ -318,12 +322,29 @@ def resolve_jobs(data):
             if task_type not in ('search', 'patrol'):
                 raise AtomicError('INVALID_ARGUMENT', 'task_type 须为 search 或 patrol', job_id=jid)
             step['task_type'] = task_type
+        path_mode = item.get('path_mode')
+        if path_mode is not None:
+            if path_mode not in ('coverage', 'boundary'):
+                raise AtomicError('INVALID_ARGUMENT', 'path_mode 须为 coverage 或 boundary', job_id=jid)
+            step['path_mode'] = path_mode
+        entry_side = item.get('entry_side')
+        if entry_side is not None:
+            if entry_side not in ('south', 'north', 'east', 'west'):
+                raise AtomicError('INVALID_ARGUMENT', 'entry_side 须为 south/north/east/west', job_id=jid)
+            step['entry_side'] = entry_side
+        direction = item.get('direction')
+        if direction is not None:
+            if direction not in ('cw', 'ccw'):
+                raise AtomicError('INVALID_ARGUMENT', 'direction 须为 cw 或 ccw', job_id=jid)
+            step['direction'] = direction
         laps = item.get('laps')
         if laps is not None:
             if type(laps) is not int or laps < 1:
                 raise AtomicError('INVALID_ARGUMENT', 'laps 须为正整数', job_id=jid)
-            if task_type == 'search' and laps != 1:
-                raise AtomicError('INVALID_ARGUMENT', 'laps 只用于巡逻', job_id=jid)
+            if laps > 1 and path_mode == 'coverage':
+                raise AtomicError('INVALID_ARGUMENT', 'laps > 1 仅用于边界绕飞（path_mode=boundary）', job_id=jid)
+            if laps > 1 and path_mode is None and task_type == 'search':
+                step['path_mode'] = 'boundary'
             step['laps'] = laps
         timeout = item.get('search_timeout')
         if timeout is not None:

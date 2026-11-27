@@ -2,10 +2,10 @@
 
 仅准备分配候选及预算、或排查候选筛选时读；单独查询一架机电量不需要本页。候选输入与事实沿用本次任务，不先用多轮 SQL 手算同一预算。
 
-`scripts/prepare_candidates.py` 查询当前资源、状态和机队配置，输入可包含 `uav_ids`、`exclude_uavs`、`payload` 字符串数组，以及 `flight_alt`（默认1.2米）。还可给出 `center_lon`、`center_lat`（成对）和可选 `radius_m`、`job_radius_m`：未点名 `uav_ids` 时按起飞点到中心的距离做附近预筛，先用经纬度包围盒在 SQL 层只读取范围内的状态记录，再用球面距离收敛成圆形；省略 `radius_m` 时半径取 `max(max_range)/2 + job_radius_m`，区域作业把外接半径传给 `job_radius_m`；点名 `uav_ids` 时不套用该预筛。使用 AGENTS.md 中的 JSON 调用与结果引用方式：
+`scripts/prepare_candidates.py` 查询当前资源、状态和机队配置，输入可包含 `uav_ids`、`exclude_uavs`、`payload` 字符串数组，以及可选 `flight_alt`（未指定时默认按 `min(50 m, max_altitude)` 计算）。还可给出 `center_lon`、`center_lat`（成对）和可选 `radius_m`、`job_radius_m`：未点名 `uav_ids` 时按起飞点到中心的距离做附近预筛，先用经纬度包围盒在 SQL 层只读取范围内的状态记录，再用球面距离收敛成圆形；省略 `radius_m` 时半径取 `max(max_range)/2 + job_radius_m`，区域作业把外接半径传给 `job_radius_m`；点名 `uav_ids` 时不套用该预筛。使用 AGENTS.md 中的 JSON 调用与结果引用方式：
 
 ```bash
-uav_runtime/.venv/bin/python uav_runtime/run.py skills/data-query/scripts/prepare_candidates.py --input '{"uav_ids":["UAV-001","UAV-003"],"flight_alt":1.2}'
+uav_runtime/.venv/bin/python uav_runtime/run.py skills/data-query/scripts/prepare_candidates.py --input '{"uav_ids":["UAV-001","UAV-003"]}'
 ```
 
 省略 `uav_ids` 表示查询全部合格机；候选数不表示实际出动数。保留原预筛条件：三处记录齐全、空闲、电量大于30%、健康度大于60、剩余航程有效、载荷符合明确要求、机型升限满足输入航高。点名候选未全部通过资源/状态预筛时返回 `CANDIDATE_EXCLUDED`，错误中带 `available_candidates`、`available_count`（当前筛选条件下可用的替代机摘要）和 `max_recorded_altitude`（记录中的最高升限）；需要全量替代机时去掉 `uav_ids`、带上作业中心重查，不能只报点名机不可达。无合格机返回 `NO_CANDIDATE`，同样带排除原因和记录中的最高升限。

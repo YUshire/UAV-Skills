@@ -218,6 +218,55 @@ class NumericPlanningTests(unittest.TestCase):
         owners = [tuple(v["actors"]["A"]) for v in result["scenarios"]]
         self.assertEqual(len(set(owners)), 1)
 
+    def test_known_coordinate_transit_computes_range_and_battery(self):
+        result = compute({
+            "uav_ids": ["UAV-258"],
+            "return_to_home": False,
+            "nodes": [
+                {"id": "T1", "action": "transit", "uav_id": "UAV-258",
+                 "params": {"target": "台北文山景美军事看守所营区", "description": "飞往(121.548125,24.997625)"}},
+                {"id": "H1", "action": "hover", "uav_id": "UAV-258"},
+            ],
+            "edges": [{"from": "T1", "to": "H1", "on": "completed"}],
+        })
+        self.assertEqual(result["planning_status"], "PLANNED", result["reply"])
+        row = result["_summary"]["scenarios"][0]["assignments"][0]
+        self.assertGreater(row["estimated_range_m"], 0)
+        self.assertIsNotNone(row["estimated_battery_after"])
+        self.assertEqual([a["cmd"] for a in row["actions"]], ["arm", "takeoff", "follow_path", "hover"])
+
+    def test_boundary_search_laps_and_work_speed(self):
+        node = {
+            "id": "S1", "action": "search", "uav_id": "UAV-125",
+            "job": {"center_lon": 120.264525, "center_lat": 22.756439, "shape": "circle",
+                    "radius": 38.5, "path_mode": "boundary", "laps": 3, "direction": "cw"},
+        }
+        rep = {"id": "R1", "action": "report", "uav_id": "UAV-125"}
+        result = compute(graph(node, rep, edges=[{"from": "S1", "to": "R1", "on": "found"}],
+                               flight_alt=30.0, work_speed=3.0))
+        self.assertEqual(result["planning_status"], "CONDITIONAL", result["reply"])
+        found = next(s for s in result["_summary"]["scenarios"] if s["events"]["S1"] == "found")
+        actions = found["assignments"][0]["actions"]
+        patrols = [a for a in actions if a["cmd"] == "patrol_move"]
+        transits = [a for a in actions if a["cmd"] == "follow_path"]
+        self.assertEqual(len(patrols), 3)
+        self.assertTrue(all(a["params"]["speed"] == 3.0 for a in patrols))
+        self.assertTrue(all(a["params"]["speed"] > 3.0 for a in transits))
+
+    def test_circle_coverage_patrol_and_default_50m_altitude(self):
+        node = {
+            "id": "P1", "action": "patrol", "uav_id": "UAV-258",
+            "job": {"center_lon": 121.427998, "center_lat": 24.993699, "shape": "circle",
+                    "radius": 33, "path_mode": "coverage", "entry_side": "south"},
+        }
+        result = compute(graph(node))
+        self.assertEqual(result["planning_status"], "PLANNED", result["reply"])
+        row = result["_summary"]["scenarios"][0]["assignments"][0]
+        self.assertEqual(row["flight_alt"], 50.0)
+        cmds = [a["cmd"] for a in row["actions"]]
+        self.assertIn("patrol_move", cmds)
+        self.assertNotIn("fuel_explore", cmds)
+
 
 if __name__ == "__main__":
     unittest.main()

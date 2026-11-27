@@ -106,7 +106,7 @@ def add_arguments(parser):
     parser.add_argument("--end-lon", type=float, required=True)
     parser.add_argument("--end-lat", type=float, required=True)
     parser.add_argument("--end-alt", type=float, default=0, help="ground elevation, excluded from horizontal distance")
-    parser.add_argument("--flight-alt", type=float, default=1.2, help="relative altitude in metres")
+    parser.add_argument("--flight-alt", type=float, default=50.0, help="relative altitude in metres")
     parser.add_argument("--points", type=int, default=3, help="number of random intermediate points")
     parser.add_argument("--seed", type=int, help="repeat the same sample with this seed")
     parser.add_argument("--threshold", type=float, help="add points to limit spacing in metres")

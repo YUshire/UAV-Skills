@@ -7,7 +7,7 @@
 ```bash
 uav_runtime/.venv/bin/python uav_runtime/run.py skills/trajectory-generation/scripts/mock_offline_map.py query-path \
   --start-lon <起点经度> --start-lat <起点纬度> --start-alt 0 \
-  --end-lon <终点经度> --end-lat <终点纬度> --end-alt 0 --flight-alt 1.2
+  --end-lon <终点经度> --end-lat <终点纬度> --end-alt 0 --flight-alt 50
 ```
 
 | 参数 | 必填 | 说明 |
@@ -24,7 +24,7 @@ uav_runtime/.venv/bin/python uav_runtime/run.py skills/trajectory-generation/scr
 ```bash
 uav_runtime/.venv/bin/python uav_runtime/run.py skills/trajectory-generation/scripts/mock_offline_map.py query-area \
   --center-lon <中心经度> --center-lat <中心纬度> --center-alt 0 \
-  --shape rectangle --length <东西长> --width <南北宽> --mode coverage --flight-alt 1.2 --lane 2
+  --shape rectangle --length <东西长> --width <南北宽> --mode coverage --flight-alt 50 --lane 2
 ```
 
 | 参数 | 必填 | 说明 |

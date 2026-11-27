@@ -14,11 +14,11 @@ uav_runtime/.venv/bin/python uav_runtime/run.py skills/trajectory-generation/scr
   "candidates": {"ref": "<candidates产物>", "select": "/data/candidates"},
   "jobs": {"ref": "<jobs产物>", "select": "/data/jobs"},
   "task_type": "search",
-  "flight_alt": 1.2,
+  "flight_alt": 50.0,
   "ordered": false
 }
 ```
-- `task_type`（`search`/`patrol`）、`flight_alt`（默认 1.2m）、`laps`（默认 1，仅巡逻）、`speed`（可选，省略按逐机 `cruise_speed`）均可作为顶层默认，作业级 `task_type`/`laps`/`search_timeout` 优先。
+- `task_type`（`search`/`patrol`）、`flight_alt`（未指定时省略，默认 `min(50 m, max_altitude)`）、`laps`（默认 1，仅巡逻）、`speed`（可选，省略按逐机 `cruise_speed`）均可作为顶层默认，作业级 `task_type`/`laps`/`search_timeout` 优先。
 - `required_drones`/`allowed_assignments`/`single_owner_jobs` 不传给 `costs`，留给后续 `allocate` 的 `extra_constraints`。
 - 最多接收 4096 候选并自动做往返下界、飞行半径与速度上限预筛（筛后 >64 报 `CANDIDATE_LIMIT_EXCEEDED`，勿手工截前 64 架）。圆形巡逻自动生成单机约束，圆形搜索允许两机共担。
 - 失败时按 `candidate_screening` 读 [diagnostics.md](../../mission-planning/references/diagnostics.md)。
