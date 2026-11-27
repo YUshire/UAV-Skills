@@ -1,7 +1,9 @@
 """Evaluate candidate aircraft from supplied records; no resource reads."""
 from copy import deepcopy
 
-from uav_runtime.budget_math import RESERVE_BATTERY_PERCENT, available_range_m, available_time_s
+from uav_runtime.budget_math import (DEFAULT_REF_ALT_M, RESERVE_BATTERY_PERCENT,
+                                     available_range_m, available_time_s,
+                                     effective_altitude_m)
 from .common import AtomicError, finite, require, required
 
 
@@ -28,7 +30,8 @@ def compute(data):
     requested = _ids(data.get("uav_ids", []), "uav_ids")
     excluded_ids = set(_ids(data.get("exclude_uavs", []), "exclude_uavs"))
     payload = _ids(data.get("payload", []), "payload")
-    altitude = finite(data.get("flight_alt", 1.2), "flight_alt", positive=True)
+    explicit_alt = data.get("flight_alt") is not None
+    altitude = finite(data["flight_alt"], "flight_alt", positive=True) if explicit_alt else DEFAULT_REF_ALT_M
     candidates, excluded = [], []
     for uid in requested or sorted(records):
         row, reasons = records.get(uid), []
@@ -64,8 +67,10 @@ def compute(data):
                 reasons.append("健康度须大于 60 且不超过 100")
             if numbers.get("flight_remain", 0) <= 0:
                 reasons.append("剩余可飞距离须大于 0")
-            if numbers.get("max_altitude", 0) < altitude:
+            if explicit_alt and numbers.get("max_altitude", 0) < altitude:
                 reasons.append("机型最大航高低于所需航高")
+            elif not explicit_alt and numbers.get("max_altitude", 0) <= 0:
+                reasons.append("机型最大航高须大于 0")
             if numbers.get("max_endurance", 0) <= 0:
                 reasons.append("最大续航须大于 0")
             installed = row.get("payload_status", "")
@@ -87,6 +92,7 @@ def compute(data):
         item = deepcopy(row)
         item.update(numbers)
         item["reserve_battery_percent"] = reserve
+        item["effective_alt"] = effective_altitude_m(numbers["max_altitude"], altitude if explicit_alt else None)
         item["range_budget"] = available_range_m(numbers["flight_remain"], battery, reserve)
         item["time_budget"] = available_time_s(numbers["max_endurance"], battery, reserve)
         candidates.append(item)

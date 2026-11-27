@@ -24,9 +24,9 @@
 ```json
 {
   "steps": [
-    {"id":"fleet","script":"skills/data-query/scripts/prepare_candidates.py","input":{"uav_ids":["UAV-016"],"flight_alt":1.2}},
+    {"id":"fleet","script":"skills/data-query/scripts/prepare_candidates.py","input":{"uav_ids":["UAV-016"]}},
     {"id":"regions","script":"skills/spatial-compute/scripts/resolve_jobs.py","input":{"jobs":[{"job_id":"J1","name":"示例圆形区域","center_lon":121.442057,"center_lat":25.239462,"shape":"circle","radius":10,"task_type":"search"}]}},
-    {"id":"costs","script":"skills/trajectory-generation/scripts/planning_routes.py","input":{"operation":"costs","candidates":{"ref_step":"fleet","select":"/data/candidates"},"jobs":{"ref_step":"regions","select":"/data/jobs"},"flight_alt":1.2,"ordered":false}},
+    {"id":"costs","script":"skills/trajectory-generation/scripts/planning_routes.py","input":{"operation":"costs","candidates":{"ref_step":"fleet","select":"/data/candidates"},"jobs":{"ref_step":"regions","select":"/data/jobs"},"ordered":false}},
     {"id":"allocation","script":"skills/mission-orchestration/scripts/allocate.py","input":{"candidates":{"ref_step":"costs","select":"/data/candidates"},"jobs":{"ref_step":"costs","select":"/data/jobs"},"costs":{"ref_step":"costs","select":"/data/costs"},"constraints":{"ref_step":"costs","select":"/data/constraints"}}},
     {"id":"routes","script":"skills/trajectory-generation/scripts/planning_routes.py","input":{"operation":"build","cost_estimate":{"ref_step":"costs"},"allocation":{"ref_step":"allocation"}}},
     {"id":"actions","script":"skills/flight-control/scripts/assemble_plan.py","input":{"plan":{"ref_step":"routes"}}}
@@ -37,19 +37,19 @@
 ### 关键输入规则
 - **`fleet`（`prepare_candidates.py`）**：点名机写 `uav_ids`；未点名（任意机/派 N 架）**省略 `uav_ids`**，并传作业中心 `center_lon`/`center_lat`（及可选 `job_radius_m`）做附近预筛；有明确载荷要求传 `payload:["红外"]`（普通目视不传）。
 - **`regions`（`resolve_jobs.py`）**：
-  - 允许字段仅 `job_id, name, place, center_lon, center_lat, shape, radius, length, width, task_type, laps, search_timeout, uav_id`。用户给了形状/尺寸就覆盖登记区；圆形必填 `radius`；矩形填 `shape:"rectangle", length:<东西向米>, width:<南北向米>`；巡逻填 `task_type:"patrol", laps:<圈数>`。
+  - 允许字段：`job_id, name, place, center_lon, center_lat, shape, radius, length, width, task_type, path_mode, entry_side, direction, laps, search_timeout, uav_id`。用户给了形状/尺寸就覆盖登记区；圆形必填 `radius`；矩形填 `shape:"rectangle", length:<东西向米>, width:<南北向米>`；几何模式 `path_mode` 可选 `"coverage"`（平行往复覆盖）或 `"boundary"`（沿边界绕飞，支持 `laps` 圈数与 `direction:"cw"|"ccw"`）；指定切入方位填 `entry_side:"south"|"north"|"east"|"west"`。
   - **【必看】按地名解析时**：凡 `jobs` 中任一项写了 `"place":"<地点名>"`，`regions.input` **必须同时传 `"places": <query_location 返回的 data 原数组>`**（全为经纬度作业时省略 `places`）。
-- **`costs`（`planning_routes.py`）**：同机“先…再…”设 `"ordered": true`；**结束动作与单/往返**：**未指定是否返航时省略 `return_to_home`（默认 `true`，按往返计算，结束后返航+`land`）**；仅当用户**明确要求盘旋/悬停/待命/不返航**时传 `"return_to_home": false`（只算单程，结束后自动原地 `hover`、不加返航与 `land`）。用户指定全局速度时传 `speed`（先核对参与机 `max_speed`，超限不静默改速）；**不向 `costs` 传 `required_drones`/`allowed_assignments`**。
+- **`costs`（`planning_routes.py`）**：同机“先…再…”设 `"ordered": true`；**结束动作与单/往返**：**未指定是否返航时省略 `return_to_home`（默认 `true`，按往返计算，结束后返航+`land`）**；仅当用户**明确要求盘旋/悬停/待命/不返航**时传 `"return_to_home": false`（只算单程，结束后自动原地 `hover`、不加返航与 `land`）。全局速度传 `speed`，**仅作业段慢速时传 `work_speed`（保持转场巡航速度）**；**不向 `costs` 传 `required_drones`/`allowed_assignments`**。
 - **`allocation`（`allocate.py`）**：
   - 两机共担/分区搜索某作业（“分成两块，各搜一块”或“派两架搜同一区域”）：写成 **1 个作业**，在 `allocation.input` 增加 `"extra_constraints":{"required_drones":2}`（点名机时加 `"allowed_assignments":{"J1":["UAV-A","UAV-B"]}`），不手拆作业，分区由 `build` 自动完成；
   - 无额外约束时省略 `extra_constraints`；多区共用同一批候选机但各区限定不同机号时，在 `extra_constraints.allowed_assignments` 逐作业列出各自允许机号。
 
 ## 意图映射、默认值与能力拦截
-- **默认值与自动错高**：航高 `1.2 m`（须 `> 0.3 m` 且 ≤ 机型升限；**多机任务中 `build` 自动按 `+0.3 m` 阶梯错高如 `1.2/1.5/1.8 m` 防碰撞，属正常设计，勿拆产物排查**）；巡逻 `1` 圈；搜索时限 `1200 s`（20 分钟）；速度用逐机 `cruise_speed`（`max_speed` 仅上限）；**结束动作默认返航降落、按往返计算（省略 `return_to_home` 即默认 `true`）**，仅明确要求盘旋/悬停/待命/不返航时设 `return_to_home: false`。
+- **默认值与自动错高**：用户未指定航高时**省略 `flight_alt`**，由工具按 `min(50 m, max_altitude)` 自动计算（默认参考航高 `50 m`，须 `> 0.3 m` 且 ≤ 机型升限；**多机任务中 `build` 自动按 `+0.3 m` 阶梯错高如 `50.0/50.3/50.6 m` 防碰撞，属正常设计，勿拆产物排查**）；巡逻 `1` 圈；搜索时限 `1200 s`（20 分钟）；速度用逐机 `cruise_speed`（`max_speed` 仅上限）；**结束动作默认返航降落、按往返计算（省略 `return_to_home` 即默认 `true`）**，仅明确要求盘旋/悬停/待命/不返航时设 `return_to_home: false`。
 - **日常表达与弓字形归类**：
   - “看看/扫一遍/查看某区域”且无上下文目标 → 无目标探索（`task_type:"search"`，不追问目标、不调 `validate_targets`）；
   - “周围 N 米扫一遍 / 巡两圈” → 以基准中心为圆心、半径 `N` 米圆形（明确说距边界外扩时保留外扩语义）；
-  - **弓字形区域覆盖**：凡表达全面覆盖/往复扫描的近似说法（如弓字形、拉网式、筛网式、梳状等类似表述），均按语义统一归类为**弓字形（平行往复）区域覆盖**，走常规 `--pipeline` 的 `task_type:"search"` 规划并输出动作 JSON（同时如实说明实际执行框范围限制）。
+  - **区域覆盖 vs 边界搜索（正交组合）**：无目标区域覆盖巡逻（矩形或圆形，含弓字形/拉网式/地毯式等）用 `task_type:"patrol", path_mode:"coverage"`（严格按圆内/矩形内平行往复航点生成，无外接正方形冲突）；带目标区域搜索用 `task_type:"search"`（区域内探索默认 `path_mode:"coverage"`；沿边界绕飞搜索用 `path_mode:"boundary", laps:<圈数>`）。
 - **超界能力直接拦截（禁止静默替代、禁止输出动作 JSON）**：
   - 明确要求**逐圈环形推进 / 同心圆逐圈覆盖 / 螺旋式由外向内或由内向外收拢**、**边巡边持续报进度**、**禁限飞区按批准航线绕行**、**遇障自动升高规避后再恢复贴边**、**全程通信链路保障**、**跨趟周期/定时循环巡逻**、**实体去重计数** → 直接按 [plan-delivery.md](plan-delivery.md) **模板 B** 拦截告知“任务无法下发（能力不足）”并反问用户是否调整，**绝不**用普通探索/巡逻偷换概念。
   - 参数非法或自相冲突（负速度、航高超升限等）→ 不自改原值，一次问清冲突项。

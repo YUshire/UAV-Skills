@@ -77,38 +77,72 @@ def segment_count(distance, spacing):
     return max(1, math.ceil(distance / spacing))
 
 
-def boundary(half_x, half_y, circle, spacing):
+VALID_ENTRY_SIDES = ("south", "north", "east", "west")
+VALID_DIRECTIONS = ("ccw", "cw")
+
+
+def _side_anchor(half_x, half_y, entry_side):
+    if entry_side == "south":
+        return (0.0, -half_y)
+    if entry_side == "north":
+        return (0.0, half_y)
+    if entry_side == "west":
+        return (-half_x, 0.0)
+    if entry_side == "east":
+        return (half_x, 0.0)
+    raise ValueError(f"entry_side must be one of {VALID_ENTRY_SIDES}")
+
+
+def boundary(half_x, half_y, circle, spacing, direction="ccw", entry_side=None):
+    if direction not in VALID_DIRECTIONS:
+        raise ValueError(f"direction must be one of {VALID_DIRECTIONS}")
     if circle:
         count = max(16, segment_count(2 * math.pi * half_x, spacing))
         if count + 1 > MAX_WAYPOINTS:
             raise ValueError(f"boundary exceeds {MAX_WAYPOINTS} waypoints")
         ring = [(half_x * math.cos(math.tau * i / count), half_x * math.sin(math.tau * i / count))
                 for i in range(count)]
-        return ring + [ring[0]]
-
-    nx = segment_count(2 * half_x, spacing)
-    ny = segment_count(2 * half_y, spacing)
-    if 2 * (nx + ny) + 1 > MAX_WAYPOINTS:
-        raise ValueError(f"boundary exceeds {MAX_WAYPOINTS} waypoints; increase lane spacing")
-    corners = [(-half_x, -half_y), (half_x, -half_y), (half_x, half_y), (-half_x, half_y)]
-    ring = []
-    for a, b, count in zip(corners, corners[1:] + corners[:1], (nx, ny, nx, ny)):
-        ring.extend((a[0] + (b[0] - a[0]) * i / count, a[1] + (b[1] - a[1]) * i / count)
-                    for i in range(count))
+    else:
+        nx = segment_count(2 * half_x, spacing)
+        ny = segment_count(2 * half_y, spacing)
+        if 2 * (nx + ny) + 1 > MAX_WAYPOINTS:
+            raise ValueError(f"boundary exceeds {MAX_WAYPOINTS} waypoints; increase lane spacing")
+        corners = [(-half_x, -half_y), (half_x, -half_y), (half_x, half_y), (-half_x, half_y)]
+        ring = []
+        for a, b, count in zip(corners, corners[1:] + corners[:1], (nx, ny, nx, ny)):
+            ring.extend((a[0] + (b[0] - a[0]) * i / count, a[1] + (b[1] - a[1]) * i / count)
+                        for i in range(count))
+    if direction == "cw":
+        ring = [ring[0]] + list(reversed(ring[1:]))
+    if entry_side is not None:
+        anchor = _side_anchor(half_x, half_y, entry_side)
+        start_idx = min(range(len(ring)), key=lambda i: math.hypot(ring[i][0] - anchor[0], ring[i][1] - anchor[1]))
+        ring = ring[start_idx:] + ring[:start_idx]
     return ring + [ring[0]]
 
 
-def sweep(half_x, half_y, circle, spacing):
+def sweep(half_x, half_y, circle, spacing, entry_side=None):
     # Each track bisects a strip. A circle smaller than one strip has a full diameter track.
-    count = segment_count(2 * half_y, spacing)
+    if entry_side not in (None, *VALID_ENTRY_SIDES):
+        raise ValueError(f"entry_side must be one of {VALID_ENTRY_SIDES}")
+    vertical = entry_side in ("west", "east")
+    span = 2 * half_x if vertical else 2 * half_y
+    count = segment_count(span, spacing)
     if 2 * count + 1 > MAX_WAYPOINTS:
         raise ValueError(f"coverage exceeds {MAX_WAYPOINTS} waypoints; increase lane spacing")
+    indices = range(count - 1, -1, -1) if entry_side in ("north", "east") else range(count)
     points = []
-    for i in range(count):
-        y = half_y * ((2 * i + 1) / count - 1)
-        extent = math.sqrt((half_y - y) * (half_y + y)) if circle else half_x
-        start_x = extent if i % 2 else -extent
-        points.extend([(start_x, y), (-start_x, y)])
+    for step_idx, i in enumerate(indices):
+        if vertical:
+            x = half_x * ((2 * i + 1) / count - 1)
+            extent = math.sqrt(max(0.0, (half_x - x) * (half_x + x))) if circle else half_y
+            start_y = extent if step_idx % 2 else -extent
+            points.extend([(x, start_y), (x, -start_y)])
+        else:
+            y = half_y * ((2 * i + 1) / count - 1)
+            extent = math.sqrt(max(0.0, (half_y - y) * (half_y + y))) if circle else half_x
+            start_x = extent if step_idx % 2 else -extent
+            points.extend([(start_x, y), (-start_x, y)])
     return points
 
 
@@ -145,9 +179,16 @@ def query_area(args):
         raise ValueError("area dimensions are too small to represent")
 
     lon, lat = getattr(args, "start_lon", None), getattr(args, "start_lat", None)
+    entry_side = getattr(args, "entry_side", None)
+    direction = getattr(args, "direction", "ccw") or "ccw"
     if (lon is None) != (lat is None):
         raise ValueError("start-lon and start-lat must be supplied together")
-    entry = (0.0, 0.0) if lon is None else frame.to_xy(lon, lat)
+    if lon is not None:
+        entry = frame.to_xy(lon, lat)
+    elif entry_side is not None:
+        entry = _side_anchor(half_x, half_y, entry_side)
+    else:
+        entry = (0.0, 0.0)
     if circle:
         overflow = math.hypot(*entry) - half_x
     else:
@@ -159,19 +200,21 @@ def query_area(args):
         longitude, latitude = frame.to_gps(*point)
         return {"longitude": longitude, "latitude": latitude, "altitude": args.flight_alt}
 
-    entry_waypoint = {"longitude": args.center_lon if lon is None else lon,
-                      "latitude": args.center_lat if lat is None else lat, "altitude": args.flight_alt}
+    entry_waypoint = ({"longitude": lon, "latitude": lat, "altitude": args.flight_alt}
+                      if lon is not None else waypoint(entry))
     result = {"status": "OK", "map_used": False, "shape": args.shape, "region": "给定区域",
               "bounds_xy": [-half_x, -half_y, half_x, half_y],
               "area_m2": math.pi * half_x**2 if circle else 4 * half_x * half_y,
               "coverage_certified": False}
+    if entry_side is not None:
+        result["entry_side"] = entry_side
     if args.mode == "boundary":
-        points = boundary(half_x, half_y, circle, spacing)
+        points = boundary(half_x, half_y, circle, spacing, direction=direction, entry_side=entry_side)
         approach = [entry_waypoint, waypoint(points[0])]
         result.update(approach_waypoints=approach, approach_length=round(horizontal_length(approach), 3),
-                      closed=True, boundary_complete=True)
+                      closed=True, boundary_complete=True, direction=direction)
     elif args.mode == "coverage":
-        samples = sweep(half_x, half_y, circle, spacing)
+        samples = sweep(half_x, half_y, circle, spacing, entry_side=entry_side)
         points = samples if math.dist(entry, samples[0]) < 1e-8 else [entry, *samples]
         result.update(reachable_samples=len(samples), candidate_samples=len(samples))
     else:
@@ -194,10 +237,12 @@ def add_arguments(parser):
     parser.add_argument("--width", type=float)
     parser.add_argument("--radius", type=float)
     parser.add_argument("--mode", choices=("boundary", "coverage"), default="coverage")
-    parser.add_argument("--flight-alt", type=float, default=1.2)
+    parser.add_argument("--flight-alt", type=float, default=50.0)
     parser.add_argument("--lane", type=float, default=2.0)
     parser.add_argument("--start-lon", type=float)
     parser.add_argument("--start-lat", type=float)
+    parser.add_argument("--entry-side", choices=VALID_ENTRY_SIDES)
+    parser.add_argument("--direction", choices=VALID_DIRECTIONS, default="ccw")
 
 
 def main():

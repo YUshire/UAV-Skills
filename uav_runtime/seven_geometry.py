@@ -10,9 +10,12 @@ import time
 import uuid
 
 from uav_runtime.atomic.common import AtomicError, digest, finite, require, required
+from uav_runtime.budget_math import DEFAULT_REF_ALT_M, effective_altitude_m
 from uav_runtime.direct_path import direct_route
 from uav_runtime.planning_geometry import (GEOMETRY_MODEL, build_steps,
-                                          cost_geometry, job_radius, region_route,
+                                          candidate_fov_deg, cost_geometry,
+                                          job_path_mode, job_radius,
+                                          job_search_work_m, region_route,
                                           search_coverage_m, search_lane_m)
 from uav_runtime.planning.allocation_contract import AllocationEvidenceError, verify_allocation
 from uav_runtime.planning.scheduler import validate_scenario, verify_result
@@ -46,7 +49,8 @@ def _prepared(request, candidate_limit=64):
     task_type = request.get("task_type", "search")
     if task_type not in ("search", "patrol"):
         raise AtomicError("INVALID_ARGUMENT", "task_type 须为 search 或 patrol")
-    altitude = finite(request.get("flight_alt", 1.2), "flight_alt", True)
+    altitude_explicit = request.get("flight_alt") is not None
+    altitude = finite(request["flight_alt"], "flight_alt", True) if altitude_explicit else DEFAULT_REF_ALT_M
     laps = request.get("laps", 1)
     if type(laps) is not int or laps < 1 or (task_type != "patrol" and laps != 1):
         raise AtomicError("INVALID_ARGUMENT", "laps 须为正整数且只用于巡逻")
@@ -59,6 +63,9 @@ def _prepared(request, candidate_limit=64):
     speed = request.get("speed")
     if speed is not None:
         speed = finite(speed, "speed", True)
+    req_work_speed = request.get("work_speed")
+    if req_work_speed is not None:
+        req_work_speed = finite(req_work_speed, "work_speed", True)
     for candidate in candidates:
         uid = candidate["uav_id"]
         for key in ("range_budget", "time_budget", "flight_remain", "battery", "max_altitude"):
@@ -68,8 +75,10 @@ def _prepared(request, candidate_limit=64):
         lat = finite(required(origin, "latitude"), uid + ".latitude")
         if not -180 <= lon <= 180 or not -90 <= lat <= 90:
             raise AtomicError("INVALID_ARGUMENT", "候选机原点超出经纬度范围")
-        if altitude > candidate["max_altitude"]:
+        if altitude_explicit and altitude > candidate["max_altitude"]:
             raise AtomicError("ALTITUDE_INFEASIBLE", "基准航高超过候选机上限", uav_id=uid)
+        candidate["planning_alt"] = effective_altitude_m(
+            candidate["max_altitude"], altitude if altitude_explicit else None)
         # Speed is a screening condition, not a fatal input error: a global
         # speed must narrow the candidate pool rather than abort the whole run.
         finite(required(candidate, "max_speed"), uid + ".max_speed", True)
@@ -106,16 +115,25 @@ def _prepared(request, candidate_limit=64):
         job_type = job.get("task_type") or task_type
         if job_type not in ("search", "patrol"):
             raise AtomicError("INVALID_ARGUMENT", "job.task_type 须为 search 或 patrol", job_id=job["job_id"])
+        raw_mode = job.get("path_mode")
+        if raw_mode is not None and raw_mode not in ("coverage", "boundary"):
+            raise AtomicError("INVALID_ARGUMENT", "job.path_mode 须为 coverage 或 boundary", job_id=job["job_id"])
         job_laps = job.get("laps")
         if job_laps is None:
-            job_laps = laps if job_type == "patrol" else 1
-        if type(job_laps) is not int or job_laps < 1 or (job_type != "patrol" and job_laps != 1):
-            raise AtomicError("INVALID_ARGUMENT", "job.laps 须为正整数且只用于巡逻", job_id=job["job_id"])
+            job_laps = laps if (raw_mode == "boundary" or (raw_mode is None and job_type == "patrol")) else 1
+        if type(job_laps) is not int or job_laps < 1:
+            raise AtomicError("INVALID_ARGUMENT", "job.laps 须为正整数", job_id=job["job_id"])
+        if raw_mode is None and job_type == "search" and job_laps > 1:
+            raw_mode = "boundary"
+        effective_mode = raw_mode or ("boundary" if job_type == "patrol" else "coverage")
+        if effective_mode == "coverage" and job_laps != 1:
+            raise AtomicError("INVALID_ARGUMENT", "覆盖模式不支持 laps > 1；绕飞多圈请设 path_mode=boundary", job_id=job["job_id"])
         job["task_type"] = job_type
+        job["path_mode"] = effective_mode
         job["laps"] = job_laps
         fixed_speed = next((candidate["planning_speed"] for candidate in candidates
                             if candidate["uav_id"] == job.get("fixed_uav")), None)
-        job["work_speed"] = speed or fixed_speed or min_planning
+        job["work_speed"] = req_work_speed or speed or fixed_speed or min_planning
         if "search_timeout" in job:
             job["search_timeout"] = finite(job["search_timeout"], "jobs.search_timeout", True)
             if job_type != "search":
@@ -130,7 +148,7 @@ def _prepared(request, candidate_limit=64):
     default_fov = min(fovs) if fovs else 89.0
     by_id = {candidate["uav_id"]: candidate for candidate in candidates}
     for job in jobs:
-        if job["task_type"] != "search":
+        if job_path_mode(job) != "coverage":
             job["fov_deg"] = None
             job["search_lane_m"] = None
             continue
@@ -147,10 +165,11 @@ def _prepared(request, candidate_limit=64):
         job["search_lane_m"] = search_lane_m(altitude, fov)
     planning_speeds = [candidate["planning_speed"] for candidate in candidates]
     return {"candidates": candidates, "jobs": jobs, "task_type": task_type,
-            "flight_alt": altitude, "laps": laps, "ordered": ordered,
+            "flight_alt": altitude, "altitude_explicit": altitude_explicit,
+            "laps": laps, "ordered": ordered,
             "return_to_home": return_to_home,
-            "speeds": {"transit": min(planning_speeds), "work": max(planning_speeds)},
-            "requested_speed": speed}
+            "speeds": {"transit": min(planning_speeds), "work": req_work_speed or max(planning_speeds)},
+            "requested_speed": speed, "requested_work_speed": req_work_speed}
 
 
 _SCREENING_NEAREST_LIMIT = 5
@@ -393,24 +412,19 @@ def _speed_alternatives(prepared, routes, work_range, plausible, skip_ids):
 def _candidate_work_range(job, altitude, fov, base_range):
     """Work distance for one candidate at one altitude.
 
-    Search coverage depends on the candidate's own FOV; patrol is unchanged.
+    Coverage depends on the candidate's own FOV; boundary loops are unchanged.
     """
-    if job["task_type"] != "search":
+    if job_path_mode(job) != "coverage":
         return base_range
-    if job["shape"] == "rectangle":
-        return search_coverage_m(job["length"], job["width"],
-                                 search_lane_m(altitude, fov)) * job["laps"]
-    return region_route(job, altitude, "search",
-                        search_lane_m(altitude, fov))["path_length"] * job["laps"]
+    return job_search_work_m(job, search_lane_m(altitude, fov))
 
 
 def _task_probe(prepared, candidate, altitude, transfer_range):
     """Best single-job range/time check for one candidate at one altitude."""
     uid = candidate["uav_id"]
     speed = candidate["planning_speed"]
-    fov = candidate.get("fov")
-    if not isinstance(fov, (int, float)) or isinstance(fov, bool) or fov <= 0:
-        fov = prepared["jobs"][0].get("fov_deg") or 89.0
+    w_speed = prepared.get("requested_work_speed") or speed
+    fov = candidate_fov_deg(candidate, prepared["jobs"][0].get("fov_deg") or 89.0)
     rows = []
     for index, job in enumerate(prepared["jobs"]):
         work = _candidate_work_range(
@@ -418,7 +432,7 @@ def _task_probe(prepared, candidate, altitude, transfer_range):
             region_route(job, altitude, job["task_type"])["path_length"] * job["laps"])
         transfer = transfer_range[uid][0][index + 1] + transfer_range[uid][index + 1][0]
         total = transfer + work
-        duration = total / speed
+        duration = transfer / speed + work / w_speed
         origin = candidate["origin"]
         center_distance = direct_route((origin["longitude"], origin["latitude"]),
                                        job["center"], altitude, points=0)["one_way_distance"]
@@ -442,20 +456,66 @@ def _task_probe(prepared, candidate, altitude, transfer_range):
     return min(rows, key=lambda row: (not row["feasible"], row["total_range_m"]))
 
 
-def _altitude_alternatives(prepared, candidates, transfer_range):
-    """Find the lowest higher altitude that makes each candidate feasible.
+def _multi_job_probe(prepared, candidate, altitude, transfer_range):
+    """Single-aircraft multi-job route check (H -> J1 -> ... -> Jn -> H) at one altitude."""
+    uid = candidate["uav_id"]
+    speed = candidate["planning_speed"]
+    w_speed = prepared.get("requested_work_speed") or speed
+    fov = candidate_fov_deg(candidate, prepared["jobs"][0].get("fov_deg") or 89.0)
+    n = len(prepared["jobs"])
+    mat = transfer_range[uid]
+    # Check if every job is individually reachable and legs exist.
+    order = list(range(1, n + 1))
+    transit = 0.0
+    prev = 0
+    for node in order:
+        leg = mat[prev][node]
+        if leg is None:
+            return None
+        transit += leg
+        prev = node
+    if prepared.get("return_to_home", True):
+        back = mat[prev][0]
+        if back is None:
+            return None
+        transit += back
+    work = 0.0
+    origin = candidate["origin"]
+    radius_ok = True
+    for job in prepared["jobs"]:
+        base = region_route(job, altitude, job["task_type"])["path_length"] * job["laps"] if job_path_mode(job) != "coverage" else 0.0
+        work += _candidate_work_range(job, altitude, fov, base)
+        center_distance = direct_route((origin["longitude"], origin["latitude"]),
+                                       job["center"], altitude, points=0)["one_way_distance"]
+        if candidate.get("max_flight_radius") is not None and center_distance + job_radius(job) > candidate["max_flight_radius"] + 1e-6:
+            radius_ok = False
+    total = transit + work
+    duration = transit / speed + work / w_speed
+    row = {"uav_id": uid, "job_id": "+".join(j["job_id"] for j in prepared["jobs"]),
+           "altitude_m": altitude, "fov_deg": fov,
+           "work_range_m": round(work, 3), "transit_range_m": round(transit, 3),
+           "total_range_m": round(total, 3), "total_time_s": round(duration, 3),
+           "range_budget": candidate["range_budget"], "time_budget": candidate["time_budget"],
+           "range_ok": total <= candidate["range_budget"] + 1e-6,
+           "time_ok": duration <= candidate["time_budget"] + 1e-6,
+           "radius_ok": radius_ok,
+           "battery_after": candidate["battery"] * (1 - total / candidate["flight_remain"])}
+    row["feasible"] = row["range_ok"] and row["time_ok"] and row["radius_ok"]
+    return row
 
-    shortcut: only used for single-job searches; a multi-job route needs a
-    route-level altitude probe, not a per-job round trip.
-    """
+
+def _altitude_alternatives(prepared, candidates, transfer_range, multi_job=False):
+    """Find the lowest higher altitude that makes each candidate feasible."""
     default = prepared["flight_alt"]
     items = []
+    probe_fn = _multi_job_probe if multi_job else _task_probe
     for candidate in candidates:
         max_alt = candidate.get("max_altitude", default)
-        for altitude in (2.0, 3.0, 5.0, 10.0, 20.0, 50.0):
-            if altitude <= default or altitude > max_alt:
-                continue
-            row = _task_probe(prepared, candidate, altitude, transfer_range)
+        cand_alts = [a for a in (2.0, 3.0, 5.0, 10.0, 20.0, 50.0) if default < a <= max_alt]
+        if default < max_alt and max_alt not in cand_alts and max_alt < 50.0:
+            cand_alts.append(max_alt)
+        for altitude in cand_alts:
+            row = probe_fn(prepared, candidate, altitude, transfer_range)
             if row and row["feasible"]:
                 items.append(row)
                 break
@@ -611,19 +671,17 @@ def _screen_candidates(prepared, routes, work_range):
 
 def costs(request):
     """Calculate numerical allocation costs from supplied aircraft and regions."""
-    if set(request) - {"operation", "candidates", "jobs", "task_type", "flight_alt", "laps", "speed", "ordered", "return_to_home"}:
+    if set(request) - {"operation", "candidates", "jobs", "task_type", "flight_alt", "laps", "speed", "work_speed", "ordered", "return_to_home"}:
         raise AtomicError("INVALID_ARGUMENT", "costs 输入含不支持字段")
     prepared = _prepared(request, candidate_limit=4096)
     routes = [region_route(job, prepared["flight_alt"], job["task_type"],
                            job.get("search_lane_m")) for job in prepared["jobs"]]
     work_range = []
     for route, job in zip(routes, prepared["jobs"]):
-        if job["task_type"] == "search" and job["shape"] == "rectangle":
-            base = search_coverage_m(job["length"], job["width"],
-                                     job.get("search_lane_m") or 2.0)
+        if job_path_mode(job) == "coverage":
+            work_range.append(job_search_work_m(job, job.get("search_lane_m") or 2.0))
         else:
-            base = route["path_length"]
-        work_range.append(base * job["laps"])
+            work_range.append(route["path_length"] * job["laps"])
     screening = _screen_candidates(prepared, routes, work_range)
     answer = cost_geometry(prepared, routes, work_range)
     reachable = answer["costs"]["reachable"]
@@ -645,13 +703,14 @@ def costs(request):
     if len(kept) != len(prepared["candidates"]):
         screening["cost_excluded_count"] = len(prepared["candidates"]) - len(kept)
         prepared["candidates"] = kept
-        for key in ("transfer_range", "transfer_time", "reachable"):
-            answer["costs"][key] = {candidate["uav_id"]: answer["costs"][key][candidate["uav_id"]]
-                                    for candidate in kept}
+        for key in ("transfer_range", "transfer_time", "reachable", "work_range_by_uav", "work_time_by_uav"):
+            if key in answer["costs"]:
+                answer["costs"][key] = {candidate["uav_id"]: answer["costs"][key][candidate["uav_id"]]
+                                        for candidate in kept}
     screening["reachable_count"] = len(kept)
     transfer_range = answer["costs"]["transfer_range"]
     if kept and len(prepared["jobs"]) == 1:
-        probes = [_task_probe(prepared, candidate, prepared["flight_alt"], transfer_range)
+        probes = [_task_probe(prepared, candidate, candidate.get("planning_alt", prepared["flight_alt"]), transfer_range)
                   for candidate in kept]
         screening["task_feasibility"] = probes
         if not any(probe and probe["feasible"] for probe in probes):
@@ -659,7 +718,7 @@ def costs(request):
             screening["altitude_alternatives"] = altitude
             best = altitude["items"][0] if altitude["feasible_count"] else None
             job_name = prepared["jobs"][0].get("name", prepared["jobs"][0]["job_id"])
-            message = (f"按默认航高 {prepared['flight_alt']:g} m，没有候选机能完成"
+            message = (f"按当前航高 {prepared['flight_alt']:g} m，没有候选机能完成"
                        f" {job_name}。")
             if best:
                 message += (f"可提高到 {best['altitude_m']:g} m：{best['uav_id']} 预计总航程"
@@ -670,33 +729,48 @@ def costs(request):
                 message += "提高到记录中的最大航高仍不可行。"
             raise AtomicError("NO_FEASIBLE_ALLOCATION", message,
                               candidate_screening=screening)
+    elif kept and len(kept) == 1 and len(prepared["jobs"]) > 1 and any(job_path_mode(j) == "coverage" for j in prepared["jobs"]):
+        probe = _multi_job_probe(prepared, kept[0], kept[0].get("planning_alt", prepared["flight_alt"]), transfer_range)
+        if probe and not probe["feasible"]:
+            altitude = _altitude_alternatives(prepared, kept, transfer_range, multi_job=True)
+            screening["altitude_alternatives"] = altitude
+            best = altitude["items"][0] if altitude["feasible_count"] else None
+            message = f"按当前航高 {prepared['flight_alt']:g} m，唯一可达候选 {kept[0]['uav_id']} 无法单趟完成全部连续作业。"
+            if best:
+                message += (f"可提高到 {best['altitude_m']:g} m：{best['uav_id']} 预计总航程"
+                            f" {best['total_range_m']:.0f} m、时间 {best['total_time_s']:.0f} s、"
+                            f"剩余电量 {best['battery_after']:.1f}%；提高航高后的识别能力"
+                            f"需设备规格或实测确认。")
+            else:
+                message += "提高到 50 m（或机型升限）仍不可行。"
+            raise AtomicError("NO_FEASIBLE_ALLOCATION", message,
+                              candidate_screening=screening)
     if len(kept) == 1:
         candidate = kept[0]
-        fov = candidate.get("fov")
-        if not isinstance(fov, (int, float)) or isinstance(fov, bool) or fov <= 0:
-            fov = prepared["jobs"][0].get("fov_deg") or 89.0
+        uid = candidate["uav_id"]
+        cand_alt = candidate.get("planning_alt", prepared["flight_alt"])
+        cand_work_speed = prepared.get("requested_work_speed") or candidate["planning_speed"]
+        fov = candidate_fov_deg(candidate, prepared["jobs"][0].get("fov_deg") or 89.0)
         for job in prepared["jobs"]:
-            job["fov_deg"] = fov if job["task_type"] == "search" else None
-            job["search_lane_m"] = (search_lane_m(prepared["flight_alt"], fov)
-                                    if job["task_type"] == "search" else None)
-            job["work_speed"] = candidate["planning_speed"]
-        updated_routes = [region_route(job, prepared["flight_alt"], job["task_type"],
+            is_cov = job_path_mode(job) == "coverage"
+            job["fov_deg"] = fov if is_cov else None
+            job["search_lane_m"] = search_lane_m(cand_alt, fov) if is_cov else None
+            job["work_speed"] = cand_work_speed
+        updated_routes = [region_route(job, cand_alt, job["task_type"],
                                        job.get("search_lane_m"))
                           for job in prepared["jobs"]]
         updated_work = [_candidate_work_range(
-            job, prepared["flight_alt"], fov,
+            job, cand_alt, fov,
             route["path_length"] * job["laps"])
             for route, job in zip(updated_routes, prepared["jobs"])]
         answer["costs"]["work_range"] = updated_work
-        answer["costs"]["work_time"] = [work / candidate["planning_speed"]
-                                        for work in updated_work]
+        answer["costs"]["work_time"] = [work / cand_work_speed for work in updated_work]
+        answer["costs"]["work_range_by_uav"][uid] = list(updated_work)
+        answer["costs"]["work_time_by_uav"][uid] = list(answer["costs"]["work_time"])
     fixed = {job["job_id"]: job["fixed_uav"] for job in prepared["jobs"] if job.get("fixed_uav")}
-    # A circular patrol must stay with one aircraft to preserve the complete
-    # boundary. A circular search area is converted to an axis-aligned search
-    # box and may be split between two owners, so it must not force single
-    # ownership.
+    # Circular boundary loops must stay with one aircraft to preserve the complete ring.
     single = [job["job_id"] for job in prepared["jobs"]
-              if job["shape"] == "circle" and job["task_type"] == "patrol"]
+              if job["shape"] == "circle" and job_path_mode(job) == "boundary"]
     constraints = {}
     if fixed:
         constraints["fixed_assignments"] = fixed
@@ -753,10 +827,17 @@ def _validate_allocation(estimate, allocation):
             expected = [[None if j == k else (0.0 if v is None else v) for k, v in enumerate(line)]
                         for j, line in enumerate(numeric[field][uid])]
             _same(row.get(field), expected, "原始求解转场成本与当前成本记录不一致")
-        _same(row.get("patrol_range_base"), [None] + numeric["work_range"], "原始求解作业航程不一致")
+        expected_work = (numeric["work_range_by_uav"][uid]
+                         if isinstance(numeric.get("work_range_by_uav"), dict) and uid in numeric["work_range_by_uav"]
+                         else numeric["work_range"])
+        _same(row.get("patrol_range_base"), [None] + expected_work, "原始求解作业航程不一致")
         speed = candidate.get("planning_speed")
-        expected_time = ([None] + [w / speed for w in numeric["work_range"]]
-                         if speed else [None] + numeric["work_time"])
+        if isinstance(numeric.get("work_time_by_uav"), dict) and uid in numeric["work_time_by_uav"]:
+            expected_time = [None] + numeric["work_time_by_uav"][uid]
+        elif speed:
+            expected_time = [None] + [w / speed for w in expected_work]
+        else:
+            expected_time = [None] + numeric["work_time"]
         _same(row.get("patrol_time_base"), expected_time, "原始求解作业时间不一致")
     constraints = require(allocation.get("constraints", {}), "constraints", dict)
     fixed = constraints.get("fixed_assignments", {})
@@ -840,23 +921,30 @@ def build(request):
         uid = supplied["uav_id"]
         candidate = candidates[uid]
         height_rank = altitude_order.index(uid) if altitude_order is not None else rank
-        altitude = float(Decimal(str(prepared["flight_alt"])) + Decimal("0.3") * height_rank)
+        base_alt = candidate.get("planning_alt", prepared["flight_alt"])
+        altitude = float(Decimal(str(base_alt)) + Decimal("0.3") * height_rank)
         maximum = candidate["max_altitude"]
         if altitude > maximum:
-            raise AtomicError("ALTITUDE_INFEASIBLE", "错高后超过任务或机型航高上限", uav_id=uid,
-                              flight_alt=altitude, max_altitude=maximum)
+            if not prepared.get("altitude_explicit", False):
+                stepped_down = float(Decimal(str(maximum)) - Decimal("0.3") * height_rank)
+                if stepped_down > 0.3:
+                    altitude = stepped_down
+            if altitude > maximum:
+                raise AtomicError("ALTITUDE_INFEASIBLE", "错高后超过任务或机型航高上限", uav_id=uid,
+                                  flight_alt=altitude, max_altitude=maximum)
         job_order = {job["job_id"]: index for index, job in enumerate(prepared["jobs"])}
         supplied_jobs = (sorted(supplied["job_ids"], key=lambda jid: job_order[jid])
                          if prepared["ordered"] else list(supplied["job_ids"]))
         ordered = [zones[(jid, uid)] for jid in supplied_jobs]
-        if any(jobs[jid]["task_type"] == "patrol" and jobs[jid]["shape"] == "circle"
+        if any(jobs[jid]["shape"] == "circle" and job_path_mode(jobs[jid]) == "boundary"
                and len(allocation["owners"][jid]) != 1 for jid in supplied_jobs):
-            raise AtomicError("ALLOCATION_EVIDENCE_MISMATCH", "圆形巡逻不能分区后代替完整圆周")
+            raise AtomicError("ALLOCATION_EVIDENCE_MISMATCH", "圆形边界不能分区后代替完整圆周")
         origin = candidate["origin"]
         speed = candidate["planning_speed"]
+        cand_fov = candidate_fov_deg(candidate, prepared["jobs"][0].get("fov_deg") or 89.0)
         steps, transit_range, work_range, work_time = build_steps(
-            prepared, ordered, origin, altitude, timeout, work_speed=speed,
-            include_metrics=request.get("step_metrics", False))
+            prepared, ordered, origin, altitude, timeout, work_speed=prepared.get("requested_work_speed") or speed,
+            include_metrics=request.get("step_metrics", False), candidate_fov=cand_fov, transit_speed=speed)
         distance = transit_range + work_range
         battery_after = candidate["battery"] * (1 - distance / candidate["flight_remain"])
         duration = transit_range / speed + work_time

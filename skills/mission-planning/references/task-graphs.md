@@ -22,7 +22,7 @@
 
 ## 输入 Schema 速查（一次写对，禁止试错）
 
-顶层字段：`nodes`（必填，1..64）、`edges`（最多 256）、可选 `flight_alt`（默认 1.2，须 `> 0.3`）、`speed`、`search_timeout`（默认 1200）、`return_to_home`（布尔值：**默认 `true`，未指定是否返航时省略即按往返组装并以返航+`land`结束；仅用户明确要求盘旋/悬停/待命/不返航时设 `false`，按单程组装并以 `hover` 结束**）、`uav_ids`、`exclude_uavs`、`payload`、`constraints`、`solver_options`、`max_duration_s`、`observed_events`、`runtime_bindings`。
+顶层字段：`nodes`（必填，1..64）、`edges`（最多 256）、可选 `flight_alt`（未指定时省略，默认 `min(50 m, max_altitude)`，须 `> 0.3`）、`speed`（全局速度）、`work_speed`（仅作业段速度，转场仍按巡航速度；如“贴边慢速”用 `work_speed` 而非压低全局 `speed`）、`search_timeout`（默认 1200）、`return_to_home`（布尔值：**默认 `true`，未指定是否返航时省略即按往返组装并以返航+`land`结束；仅用户明确要求盘旋/悬停/待命/不返航时设 `false`，按单程组装并以 `hover` 结束**）、`uav_ids`、`exclude_uavs`、`payload`、`constraints`、`solver_options`、`max_duration_s`、`observed_events`、`runtime_bindings`。
 
 - **`constraints` 精确类型（严禁写错）**：
   - `fixed_assignments`：`{"节点id": "UAV-XXX"}`（单机固定字典）
@@ -35,7 +35,7 @@
 | `id` | 唯一编号，字母开头，仅 `[A-Za-z0-9_-]` |
 | `action` | 区域动作：`search`、`patrol`；接口动作：`scan`、`track`、`observe`、`record_start`、`record_stop`、`photo`、`set_mode`、`hover`、`wait`、`report`、`transit`、`return`、`land` |
 | `uav_id` | 仅单架指定机时填。**多机共担或自动选机时省略节点层 `uav_id`**，改在顶层 `constraints` 写 `allowed_assignments` 与全局整数 `required_drones` |
-| `job` | **仅 `search`/`patrol` 必填**（`place` 或 `center_lon/center_lat` + `shape` + 尺寸 + 可选 `laps`/`search_timeout`/`name`；发现后动态区域用 `"center_from":{"from_step":"S1","field":"target_position"}` 且须受 `found` 约束）。**严禁在 `job` 内写 `job_id`/`uav_id`/`task_type`** |
+| `job` | **仅 `search`/`patrol` 必填**（`place` 或 `center_lon/center_lat` + `shape` + 尺寸 + 可选 `path_mode:"coverage"|"boundary"`、`entry_side:"south"|"north"|"east"|"west"`、`direction:"cw"|"ccw"`、`laps`、`search_timeout`、`name`；沿边界搜索/绕飞 N 圈搜目标设 `action:"search", path_mode:"boundary", laps:N`；发现后动态区域用 `"center_from":{"from_step":"S1","field":"target_position"}` 且须受 `found` 约束）。**严禁在 `job` 内写 `job_id`/`uav_id`/`task_type`** |
 | `params` | **仅允许 6 个键**：`duration_s`（正秒数）、`mode`、`target`、`targets`、`description`、`until_step`（其他键报错）。`transit`/`report`/`scan`/`track`/`observe` **不写 `job`**；`track` 的 `params.target` 填目标名称字符串（如 `"发现目标"`），**严禁**写 `{"from_step":...,"field":"target"}`（动态引用唯一合法格式为 `{"from_step":"S1","field":"target_position"}` 且仅限 `found` 分支） |
 | `join` | 默认 `all`（全部前置满足）；`any`（任一满足）。未指定结束动作时省略显式 `return`/`land`（默认往返并在末尾自动返航+`land`）；仅明确要求原地悬停/待命时设 `"return_to_home": false`（单程并以 `hover` 结束），也可显式加 `hover`；若显式写了汇合节点且同时依赖互斥/条件分支，须设 `join:"any"` |
 
@@ -51,7 +51,7 @@
 ```json
 {
   "uav_ids": ["UAV-343","UAV-382","UAV-292","UAV-231"],
-  "flight_alt": 1.2,
+  "flight_alt": 50.0,
   "constraints": {
     "allowed_assignments": {"S1": ["UAV-343","UAV-382"], "S2": ["UAV-292","UAV-231"]},
     "required_drones": 4

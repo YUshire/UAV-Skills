@@ -44,7 +44,7 @@ SUPPORTED_CMDS = {
 TOP_LEVEL_KEYS = {"cmd", "task_id", "step_id", "params"}
 COORDINATE_CMDS = {"follow_path", "patrol_move", "fuel_explore"}
 EARTH_RADIUS_M = 6378137.0
-DEFAULT_MAX_DISTANCE_M = 20000.0
+DEFAULT_MAX_DISTANCE_M = 30000.0
 OUTPUT_DECIMALS = 6
 
 

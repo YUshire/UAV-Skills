@@ -37,9 +37,9 @@ uav_runtime/.venv/bin/python uav_runtime/run.py skills/data-query/scripts/query_
 ```bash
 # 点名机筛选；查全量周边替代机时去掉 uav_ids 并传作业中心 center_lon/center_lat
 uav_runtime/.venv/bin/python uav_runtime/run.py skills/data-query/scripts/prepare_candidates.py \
-  --input '{"uav_ids":["UAV-001","UAV-003"],"flight_alt":1.2}'
+  --input '{"uav_ids":["UAV-001","UAV-003"]}'
 ```
-- 可选字段：`uav_ids`、`exclude_uavs`、`payload`（字符串数组，全部同时满足，如 `["红外"]`）、`flight_alt`（默认 1.2）、`center_lon`/`center_lat`（成对，未点名时做附近与坐标转换预筛）、`job_radius_m`。
+- 可选字段：`uav_ids`、`exclude_uavs`、`payload`（字符串数组，全部同时满足，如 `["红外"]`）、`flight_alt`（未指定时省略，默认 `min(50 m, max_altitude)`）、`center_lon`/`center_lat`（成对，未点名时做附近与坐标转换预筛）、`job_radius_m`。
 - 预筛自动核对：空闲、电量 >30%、健康度 >60、剩余航程有效、载荷与升限满足；预算由工具扣除返航预留（至少 20%），不手工二次折减。点名机不满足返回 `CANDIDATE_EXCLUDED`（附 `available_candidates` 与 `max_recorded_altitude`）。
 - **直接复用 `summary.candidates_top`（禁止拆读 `candidates-*.json`）**：返回摘要已按可达性与距离排序给出前 15 架精简信息（含 `uav_id`/`payload`/`max_endurance_min`/`dist_m`/`max_flight_radius_m`/`range_budget_m`/`time_budget_s`/`reachable_lb`）；给出周边替代机时**仅推荐 `reachable_lb=true` 的机号**，严禁 `read_file` 或 `python -c` 解析候选大产物。
 

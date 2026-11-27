@@ -13,12 +13,15 @@ import re
 import sys
 
 from .atomic.common import AtomicError, finite, require
+from .budget_math import DEFAULT_REF_ALT_M
 from .atomic.query import compute as query
 from .atomic.allocation import compute as allocate
 from .direct_path import direct_route
 from .mission import constraints_for
 from .mission_models import digest
-from .planning_geometry import lon_lat, region_route, search_box
+from .planning_geometry import (candidate_fov_deg, job_path_mode,
+                                job_search_work_m, lon_lat, region_route,
+                                search_box, search_lane_m)
 from .seven_inputs import prepare_candidates, resolve_jobs
 from .seven_geometry import costs, build
 from .task_graph import (validate, scenarios, bind, references, GEOMETRY_ACTIONS,
@@ -163,7 +166,7 @@ def _synthesize_scenario_actions(request, graph, variant, plan, geometry_actions
             uav_nodes.setdefault(uid, []).append(nid)
 
     synthesized = {}
-    base_alt = float(graph.get("flight_alt", 1.2))
+    base_alt = float(graph.get("flight_alt", DEFAULT_REF_ALT_M))
     order = list(altitude_order or [])
     for uid, nids in uav_nodes.items():
         if uid not in order:
@@ -189,11 +192,15 @@ def _synthesize_scenario_actions(request, graph, variant, plan, geometry_actions
 
         task_id = f"{plan_task_key}-{uid}"
         raw = []
+        work_speed = request.get("work_speed")
+        if work_speed is not None:
+            work_speed = round(float(work_speed), 3)
 
-        def add(cmd, params):
+        def add(cmd, params, cmd_speed=None):
             p = deepcopy(params)
-            if speed is not None and cmd in ("takeoff", "follow_path", "patrol_move", "fuel_explore"):
-                p.setdefault("max_vel" if cmd == "fuel_explore" else "speed", speed)
+            use_speed = cmd_speed if cmd_speed is not None else speed
+            if use_speed is not None and cmd in ("takeoff", "follow_path", "patrol_move", "fuel_explore"):
+                p.setdefault("max_vel" if cmd == "fuel_explore" else "speed", use_speed)
             raw.append({"cmd": cmd, "task_id": task_id, "step_id": len(raw) + 1, "params": p})
 
         origin = _uav_origin(rec)
@@ -201,6 +208,9 @@ def _synthesize_scenario_actions(request, graph, variant, plan, geometry_actions
         did_return = False
         did_land = False
         total_range_m = 0.0
+        total_time_s = 0.0
+        max_point_dist_m = 0.0
+        all_legs_resolved = True
 
         add("arm", {})
         add("takeoff", {"altitude": flight_alt})
@@ -214,9 +224,14 @@ def _synthesize_scenario_actions(request, graph, variant, plan, geometry_actions
                 if dest is not None and current_pos is not None:
                     leg = direct_route(current_pos, dest, flight_alt)
                     total_range_m += leg["one_way_distance"]
+                    if speed:
+                        total_time_s += leg["one_way_distance"] / speed
+                    if origin is not None:
+                        max_point_dist_m = max(max_point_dist_m, direct_route(origin, dest, flight_alt, points=0)["one_way_distance"])
                     add("follow_path", {"waypoints": _compact_waypoints(leg["go_waypoints"]), "skip_unreachable": False})
                     current_pos = dest
                 else:
+                    all_legs_resolved = False
                     add("follow_path", {"target": params.get("target") or params.get("description") or nid, "skip_unreachable": False})
             elif kind in GEOMETRY_ACTIONS:
                 job = deepcopy(node.get("job") or {})
@@ -229,27 +244,40 @@ def _synthesize_scenario_actions(request, graph, variant, plan, geometry_actions
                     job.update(job_id=nid, task_type=kind)
                     try:
                         zone = resolve_jobs({"jobs": [job], "places": places})["jobs"][0]
-                        route = region_route(zone, flight_alt, kind, zone.get("search_lane_m"))
+                        mode = job_path_mode(zone, kind)
+                        cand_fov = candidate_fov_deg(rec)
+                        lane = search_lane_m(flight_alt, cand_fov) if mode == "coverage" else None
+                        route = region_route(zone, flight_alt, kind, lane)
                         entry = lon_lat(route["waypoints"][0])
                         if current_pos is not None:
                             leg = direct_route(current_pos, entry, flight_alt)
                             total_range_m += leg["one_way_distance"]
+                            if speed:
+                                total_time_s += leg["one_way_distance"] / speed
                             add("follow_path", {"waypoints": _compact_waypoints(leg["go_waypoints"]), "skip_unreachable": False})
-                        if kind == "search":
+                        w_speed = work_speed or speed
+                        laps = int(zone.get("laps") or 1)
+                        if mode == "coverage":
+                            work_len = job_search_work_m({**zone, "laps": laps}, lane or 2.0)
+                        else:
+                            work_len = route["path_length"] * laps
+                        total_range_m += work_len
+                        if w_speed:
+                            total_time_s += work_len / w_speed
+                        if kind == "search" and mode == "coverage":
                             bmin, bmax = search_box(zone, flight_alt)
                             timeout_sec = float(job.get("search_timeout") or request.get("search_timeout") or 1200)
-                            total_range_m += route["path_length"]
-                            add("fuel_explore", {"box_min": bmin, "box_max": bmax, "timeout_sec": timeout_sec})
+                            add("fuel_explore", {"box_min": bmin, "box_max": bmax, "timeout_sec": timeout_sec}, cmd_speed=w_speed)
                         else:
-                            laps = int(zone.get("laps") or 1)
-                            total_range_m += route["path_length"] * laps
                             wview = _compact_waypoints(route["waypoints"])
                             for _ in range(laps):
-                                add("patrol_move", {"waypoints": wview, "skip_unreachable": False})
+                                add("patrol_move", {"waypoints": wview, "skip_unreachable": False}, cmd_speed=w_speed)
                         current_pos = lon_lat(route["waypoints"][-1])
                     except Exception:
+                        all_legs_resolved = False
                         add("fuel_explore" if kind == "search" else "patrol_move", {"job_id": nid, "job": job})
                 else:
+                    all_legs_resolved = False
                     add("fuel_explore" if kind == "search" else "patrol_move", {"job_id": nid, "job": job})
             elif kind in ("hover", "wait"):
                 # 与 submit_queue_batch 校验契约保持一致：hover.params 必须为空对象
@@ -258,6 +286,8 @@ def _synthesize_scenario_actions(request, graph, variant, plan, geometry_actions
                 if current_pos is not None and origin is not None and current_pos != origin:
                     leg = direct_route(current_pos, origin, flight_alt)
                     total_range_m += leg["one_way_distance"]
+                    if speed:
+                        total_time_s += leg["one_way_distance"] / speed
                     add("follow_path", {"waypoints": _compact_waypoints(leg["go_waypoints"]), "skip_unreachable": False})
                     current_pos = origin
                 did_return = True
@@ -280,6 +310,8 @@ def _synthesize_scenario_actions(request, graph, variant, plan, geometry_actions
                 if current_pos is not None and origin is not None and current_pos != origin:
                     leg = direct_route(current_pos, origin, flight_alt)
                     total_range_m += leg["one_way_distance"]
+                    if speed:
+                        total_time_s += leg["one_way_distance"] / speed
                     add("follow_path", {"waypoints": _compact_waypoints(leg["go_waypoints"]), "skip_unreachable": False})
                 add("land", {})
             else:
@@ -287,12 +319,30 @@ def _synthesize_scenario_actions(request, graph, variant, plan, geometry_actions
                 if not raw or raw[-1]["cmd"] != "hover":
                     add("hover", {})
 
+        battery_level = rec.get("battery_level")
+        flight_remain = rec.get("flight_remain")
+        range_budget = rec.get("range_budget")
+        time_budget = rec.get("time_budget")
+        est_battery_after = None
+        if (all_legs_resolved and total_range_m > 0
+                and isinstance(battery_level, (int, float))
+                and isinstance(flight_remain, (int, float)) and flight_remain > 0):
+            est_battery_after = round(battery_level * (1.0 - total_range_m / flight_remain), 6)
+
         synthesized[uid] = {
             "uav_id": uid,
             "flight_alt": flight_alt,
             "speed": speed,
+            "work_speed": work_speed,
             "nodes": nids,
+            "battery_level": battery_level,
+            "range_budget_m": range_budget,
+            "time_budget_s": time_budget,
             "estimated_range_m": round(total_range_m, 3) if total_range_m > 0 else None,
+            "estimated_time_s": round(total_time_s, 3) if total_time_s > 0 else None,
+            "estimated_battery_after": est_battery_after,
+            "max_point_dist_m": round(max_point_dist_m, 3) if max_point_dist_m > 0 else None,
+            "all_legs_resolved": all_legs_resolved,
             "return_to_home": bool(did_return or return_to_home),
             "actions": raw,
         }
@@ -340,6 +390,11 @@ def _scenario_summary(variant):
         }
         if dists:
             item["takeoff_to_jobs_m"] = dists
+        if uid in synthesized and synthesized[uid].get("estimated_range_m") is not None and synthesized[uid].get("all_legs_resolved"):
+            # When a branch adds explicit return/report/hover on top of geometry_plan, keep range/battery synced with this branch's actual actions.
+            item["estimated_range_m"] = synthesized[uid]["estimated_range_m"]
+            if synthesized[uid].get("estimated_battery_after") is not None:
+                item["estimated_battery_after"] = synthesized[uid]["estimated_battery_after"]
         if uid in action_reports:
             item["actions"] = action_reports[uid]
         assignments.append(item)
@@ -352,12 +407,18 @@ def _scenario_summary(variant):
             "flight_alt": info.get("flight_alt"),
             "speed": info.get("speed"),
             "jobs": info.get("nodes"),
-            "time_budget_s": b.get("time_budget_s"),
+            "battery_level": info.get("battery_level"),
+            "range_budget_m": info.get("range_budget_m"),
+            "time_budget_s": b.get("time_budget_s") if b.get("time_budget_s") is not None else info.get("time_budget_s"),
             "return_to_home": info.get("return_to_home"),
             "actions": info["actions"],
         }
         if info.get("estimated_range_m") is not None:
             item["estimated_range_m"] = info["estimated_range_m"]
+        if info.get("estimated_time_s") is not None:
+            item["estimated_time_s"] = info["estimated_time_s"]
+        if info.get("estimated_battery_after") is not None:
+            item["estimated_battery_after"] = info["estimated_battery_after"]
         assignments.append(item)
     return {
         "scenario_id": variant.get("scenario_id"),
@@ -407,7 +468,7 @@ def _assemble(plan):
         sys.path.remove(str(scripts))
 
 
-def _routes(request, graph, active, locked_owners=None, altitude_order=None):
+def _routes(request, graph, active, locked_owners=None, altitude_order=None, places_cache=None):
     """Plan all known, connected jobs jointly; preserve uncertain continuations."""
     jobs, pending, blocked, terminal_actors, moved_actors = [], [], set(), set(), set()
     nodes = graph["indexed"]
@@ -446,19 +507,22 @@ def _routes(request, graph, active, locked_owners=None, altitude_order=None):
                 job["uav_id"] = node["uav_id"]
             jobs.append(job)
         if changes_origin:
-            blocked.add(nid)
-            moved_actors.add(node.get("uav_id"))
-            if node["action"] in {"track", "transit"}:
+            known_transit = (node["action"] == "transit"
+                             and node.get("uav_id") is not None
+                             and _resolve_transit_dest(node, places_cache or []) is not None)
+            if not known_transit:
+                blocked.add(nid)
                 pending.append(_issue("RUNTIME_TRAJECTORY", "保留该飞行步骤，实际路径确定后补算航程", nid))
+            moved_actors.add(node.get("uav_id"))
     if not jobs:
         if "required_drones" in request.get("constraints", {}):
             pending.append(_issue("DEFERRED_FLEET_COUNT", "完整出动数量约束已保留，尚无可联合分配的已知区域作业"))
         return None, None, None, pending
     candidate_args = {k: request[k] for k in ("flight_alt", "uav_ids", "exclude_uavs", "payload") if k in request}
     prepared = prepare_candidates(candidate_args)
-    places = query({"entity": "places"})["places"] if any("place" in j for j in jobs) else []
+    places = places_cache if places_cache is not None else (query({"entity": "places"})["places"] if any("place" in j for j in jobs) else [])
     resolved = resolve_jobs({"jobs": jobs, "places": places})
-    parameters = {k: request[k] for k in ("flight_alt", "speed", "return_to_home") if k in request}
+    parameters = {k: request[k] for k in ("flight_alt", "speed", "work_speed", "return_to_home") if k in request}
     estimate = costs(dict(parameters, ordered=True, candidates=prepared["candidates"], jobs=resolved["jobs"]))
     supplied = deepcopy(request.get("constraints", {}))
     require(supplied, "constraints", dict)
@@ -537,10 +601,11 @@ def _actors(graph, active, plan):
     return actors
 
 
-def _timing(request, graph, variant, plan, fleet, pending):
+def _timing(request, graph, variant, plan, fleet, pending, places_cache=None):
     active, nodes = variant["active"], graph["indexed"]
     actors = _actors(graph, active, plan)
     metrics, rows, tail, climb, descent = {}, {}, {}, {}, {}
+    transit_pos, transit_range_acc, transit_time_acc, transit_all_known, transit_max_dist = {}, {}, {}, {}, {}
     for row in (plan or {}).get("assignments", []):
         uid = row["uav_id"]
         rows[uid] = row
@@ -566,6 +631,7 @@ def _timing(request, graph, variant, plan, fleet, pending):
                 pending.append(_issue("MISSING_VERTICAL_SPEED", f"{uid}缺少有效{field}，不能算完整起降时间"))
     clock, resource, first_flight, last_flight, timeline = {}, {}, {}, {}, []
     has_takeoff, resource_edges, violations = set(), [], []
+    base_alt = float(graph.get("flight_alt", DEFAULT_REF_ALT_M))
     for nid in active:
         node, kind = nodes[nid], nodes[nid]["action"]
         edges = [e for e in graph["incoming"][nid] if e["from"] in active and
@@ -587,11 +653,55 @@ def _timing(request, graph, variant, plan, fleet, pending):
             duration = node["params"].get("duration_s")
             if kind in GEOMETRY_ACTIONS:
                 duration = metrics.get((nid, uid))
+            elif kind == "transit" and uid and uid not in rows:
+                dest = _resolve_transit_dest(node, places_cache or [])
+                rec = fleet.get(uid) or {}
+                origin = _uav_origin(rec)
+                prev_pos = transit_pos.get(uid, origin)
+                u_speed = request.get("speed") or rec.get("planning_speed") or rec.get("cruise_speed")
+                if dest is not None and prev_pos is not None and u_speed:
+                    leg_m = direct_route(prev_pos, dest, base_alt, points=0)["one_way_distance"]
+                    duration = leg_m / float(u_speed)
+                    transit_pos[uid] = dest
+                    transit_range_acc[uid] = transit_range_acc.get(uid, 0.0) + leg_m
+                    transit_time_acc[uid] = transit_time_acc.get(uid, 0.0) + duration
+                    if origin is not None:
+                        d0 = direct_route(origin, dest, base_alt, points=0)["one_way_distance"]
+                        transit_max_dist[uid] = max(transit_max_dist.get(uid, 0.0), d0)
+                    transit_all_known.setdefault(uid, True)
+                else:
+                    transit_all_known[uid] = False
+                    pending.append(_issue("NEEDS_DURATION", "该步骤需要持续时间或实际路径耗时", nid))
             elif kind == "return":
-                duration = tail.get(uid)
+                if uid in tail:
+                    duration = tail.get(uid)
+                elif uid and uid not in rows and transit_all_known.get(uid):
+                    rec = fleet.get(uid) or {}
+                    origin = _uav_origin(rec)
+                    prev_pos = transit_pos.get(uid)
+                    u_speed = request.get("speed") or rec.get("planning_speed") or rec.get("cruise_speed")
+                    if origin is not None and prev_pos is not None and u_speed:
+                        leg_m = direct_route(prev_pos, origin, base_alt, points=0)["one_way_distance"]
+                        duration = leg_m / float(u_speed)
+                        transit_pos[uid] = origin
+                        transit_range_acc[uid] = transit_range_acc.get(uid, 0.0) + leg_m
+                        transit_time_acc[uid] = transit_time_acc.get(uid, 0.0) + duration
             elif kind == "land":
                 duration = descent.get(uid)
-            elif duration is None and kind in {"track", "observe", "hover", "wait", "scan", "transit"}:
+                if duration is None and uid and uid not in rows:
+                    ds = (fleet.get(uid) or {}).get("max_down_speed")
+                    if isinstance(ds, (int, float)) and ds > 0:
+                        duration = base_alt / float(ds)
+            elif kind in ("hover", "wait") and duration is None:
+                # Terminal standby hover after transit does not block computing arrival range/battery.
+                has_downstream = any(e["from"] == nid and e["to"] in active for e in graph["edges"])
+                if has_downstream:
+                    pending.append(_issue("NEEDS_DURATION", "该步骤需要持续时间或实际路径耗时", nid))
+                else:
+                    duration = 0.0
+            elif duration is None and kind in {"track", "observe", "scan", "transit"}:
+                if uid and uid not in rows:
+                    transit_all_known[uid] = False
                 pending.append(_issue("NEEDS_DURATION", "该步骤需要持续时间或实际路径耗时", nid))
             elif duration is None:
                 duration = 0.0  # Control-interface latency is not calibrated.
@@ -647,21 +757,49 @@ def _timing(request, graph, variant, plan, fleet, pending):
                         "reserved_airborne_time_s": duration, "time_budget_s": row["time_budget"],
                         "within_time_budget": within, "whole_mission_energy_complete": False})
         finish_times.append(final)
-    # Interface-only actors still consume endurance. Even when their route is
-    # unknown, an explicit tracking/hover duration can already exceed budget.
+    # Interface-only actors still consume endurance. For known-coordinate transit-only
+    # missions, compute full horizontal range, battery and budget verification directly.
     other_airborne = {uid for nid in active if nodes[nid]["action"] in FLIGHT_ACTIONS
                       for uid in actors[nid]} - set(rows)
     for uid in sorted(other_airborne):
         actor_nodes = [nid for nid in active if uid in actors[nid] and nodes[nid]["action"] in FLIGHT_ACTIONS]
-        duration_lower_bound = sum(nodes[nid]["params"].get("duration_s", 0) for nid in actor_nodes)
-        budget = fleet[uid].get("time_budget")
-        within = False if budget is not None and duration_lower_bound > budget + 1e-6 else None
-        if within is False:
-            violations.append(_issue("TIME_BUDGET", f"{uid}仅明确要求的持续时间已超过预留后预算"))
-        pending.append(_issue("RUNTIME_GEOMETRY", f"{uid}的完整往返路径和起降时间尚待计算"))
-        budgets.append({"uav_id": uid, "known_duration_lower_bound_s": duration_lower_bound,
-                        "time_budget_s": budget, "within_time_budget": within,
-                        "horizontal_range_m": None, "whole_mission_energy_complete": False})
+        rec = fleet.get(uid) or {}
+        budget = rec.get("time_budget")
+        range_budget = rec.get("range_budget")
+        max_radius = rec.get("max_flight_radius")
+        if transit_all_known.get(uid) and all(nodes[nid]["action"] in {"transit", "hover", "wait", "return", "land"} for nid in actor_nodes):
+            last_action = nodes[actor_nodes[-1]]["action"]
+            rth = request["return_to_home"] if "return_to_home" in request else (last_action not in ("hover", "wait"))
+            did_ret = any(nodes[nid]["action"] == "return" for nid in actor_nodes)
+            total_m = transit_range_acc.get(uid, 0.0)
+            total_s = transit_time_acc.get(uid, 0.0) + sum(nodes[nid]["params"].get("duration_s", 0) for nid in actor_nodes)
+            origin = _uav_origin(rec)
+            cur_pos = transit_pos.get(uid)
+            u_speed = request.get("speed") or rec.get("planning_speed") or rec.get("cruise_speed")
+            if rth and not did_ret and origin is not None and cur_pos is not None and cur_pos != origin and u_speed:
+                back_m = direct_route(cur_pos, origin, base_alt, points=0)["one_way_distance"]
+                total_m += back_m
+                total_s += back_m / float(u_speed)
+            if isinstance(range_budget, (int, float)) and total_m > range_budget + 1e-6:
+                violations.append(_issue("RANGE_BUDGET", f"{uid}预计水平航程{total_m:.1f}米超过可用航程预算{range_budget:.1f}米"))
+            if isinstance(budget, (int, float)) and total_s > budget + 1e-6:
+                violations.append(_issue("TIME_BUDGET", f"{uid}预计飞行时间{total_s:.1f}秒超过可用时间预算{budget:.1f}秒"))
+            if isinstance(max_radius, (int, float)) and transit_max_dist.get(uid, 0.0) > max_radius + 1e-6:
+                violations.append(_issue("FLIGHT_RADIUS", f"{uid}目标点距起飞点{transit_max_dist[uid]:.1f}米超过最大飞行半径{max_radius:g}米"))
+            within = None if budget is None else total_s <= budget + 1e-6
+            budgets.append({"uav_id": uid, "flight_alt": base_alt,
+                            "horizontal_range_m": round(total_m, 3), "range_budget_m": range_budget,
+                            "reserved_airborne_time_s": round(total_s, 3), "time_budget_s": budget,
+                            "within_time_budget": within, "whole_mission_energy_complete": False})
+        else:
+            duration_lower_bound = sum(nodes[nid]["params"].get("duration_s", 0) for nid in actor_nodes)
+            within = False if budget is not None and duration_lower_bound > budget + 1e-6 else None
+            if within is False:
+                violations.append(_issue("TIME_BUDGET", f"{uid}仅明确要求的持续时间已超过预留后预算"))
+            pending.append(_issue("RUNTIME_GEOMETRY", f"{uid}的完整往返路径和起降时间尚待计算"))
+            budgets.append({"uav_id": uid, "known_duration_lower_bound_s": duration_lower_bound,
+                            "time_budget_s": budget, "within_time_budget": within,
+                            "horizontal_range_m": None, "whole_mission_energy_complete": False})
     mission_time = None if None in finish_times else max(finish_times, default=0)
     deadline = request.get("max_duration_s")
     deadline_ok = None if deadline is None or mission_time is None else mission_time <= deadline + 1e-6
@@ -718,8 +856,12 @@ def _reply(graph, variants, state, request):
                 details.append(f"半径{job['radius']:g}米")
             elif job.get("shape") == "rectangle" and all(k in job for k in ("length", "width")):
                 details.append(f"东西{job['length']:g}米、南北{job['width']:g}米的矩形")
-            if kind == "patrol":
+            if job_path_mode(job, kind) == "boundary":
                 details.append(str(job.get("laps", 1)) + "圈")
+            if job.get("entry_side"):
+                details.append(f"从{ {'south':'南','north':'北','east':'东','west':'西'}.get(job['entry_side'], job['entry_side']) }侧切入")
+            if job.get("direction"):
+                details.append("顺时针" if job["direction"] == "cw" else "逆时针")
             if kind == "search":
                 details.append(f"搜索时限{job.get('search_timeout', request.get('search_timeout', 1200)):g}秒")
         params = node["params"]
@@ -800,8 +942,8 @@ def compute(request):
     for index, variant in enumerate(variants, 1):
         result = dict(variant, scenario_id=f"B{index}")
         try:
-            plan, actions, estimate, pending = _routes(request, graph, variant["active"], locked_owners, altitude_order)
-            result.update(_timing(request, graph, variant, plan, fleet, pending))
+            plan, actions, estimate, pending = _routes(request, graph, variant["active"], locked_owners, altitude_order, places_cache)
+            result.update(_timing(request, graph, variant, plan, fleet, pending, places_cache))
             result.update(pending=pending, geometry_plan=plan, geometry_actions=actions,
                           cost_estimate=estimate, geometry_scope="known_connected_prefix",
                           validated_for_execution=False)

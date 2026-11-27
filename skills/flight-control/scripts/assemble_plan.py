@@ -67,10 +67,11 @@ def compute(request):
         raw = []
         speed = assignment.get("speed") if assignment.get("speed") is not None else plan.get("speed")
 
-        def add(cmd, params):
+        def add(cmd, params, cmd_speed=None):
             params = deepcopy(params)
-            if speed is not None and cmd in ("takeoff", "follow_path", "patrol_move", "fuel_explore"):
-                params["max_vel" if cmd == "fuel_explore" else "speed"] = speed
+            use_speed = cmd_speed if cmd_speed is not None else speed
+            if use_speed is not None and cmd in ("takeoff", "follow_path", "patrol_move", "fuel_explore"):
+                params["max_vel" if cmd == "fuel_explore" else "speed"] = use_speed
             raw.append({"cmd": cmd, "task_id": task_id, "step_id": len(raw) + 1, "params": params})
 
         add("arm", {})
@@ -80,18 +81,26 @@ def compute(request):
         for step in steps:
             require(step, "step", dict)
             kind = required(step, "type")
+            step_speed = step.get("work_speed")
             if kind == "transit":
                 add("follow_path", {"waypoints": required(step, "waypoints"), "skip_unreachable": False})
                 ends_with_hover = False
             elif kind == "search":
-                add("fuel_explore", {key: required(step, key) for key in ("box_min", "box_max", "timeout_sec")})
+                if step.get("path_mode") == "boundary":
+                    laps = step.get("laps", 1)
+                    if type(laps) is not int or laps < 1:
+                        raise AtomicError("INVALID_ARGUMENT", "边界搜索 laps 须为正整数")
+                    for _ in range(laps):
+                        add("patrol_move", {"waypoints": required(step, "waypoints"), "skip_unreachable": False}, cmd_speed=step_speed)
+                else:
+                    add("fuel_explore", {key: required(step, key) for key in ("box_min", "box_max", "timeout_sec")}, cmd_speed=step_speed)
                 ends_with_hover = False
             elif kind == "patrol":
                 laps = required(step, "laps")
                 if type(laps) is not int or laps < 1:
                     raise AtomicError("INVALID_ARGUMENT", "巡逻 laps 须为正整数")
                 for _ in range(laps):
-                    add("patrol_move", {"waypoints": required(step, "waypoints"), "skip_unreachable": False})
+                    add("patrol_move", {"waypoints": required(step, "waypoints"), "skip_unreachable": False}, cmd_speed=step_speed)
                 ends_with_hover = False
             elif kind == "hover":
                 add("hover", {})
